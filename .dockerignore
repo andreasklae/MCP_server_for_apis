@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+dist
+build
+.venv
+venv
+
+# IDE
+.idea
+.vscode
+*.swp
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov
+.mypy_cache
+
+# Docs (not needed in container)
+docs/
+
+# Environment files (secrets)
+.env
+.env.local
+*.env
+
+# CI/CD
+.github
+
+# Misc
+*.md
+!README.md
+Makefile
+
