@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.config.loader import get_settings, load_api_config, get_enabled_providers
@@ -74,6 +75,16 @@ app = FastAPI(
     description="MCP server for Norwegian cultural heritage APIs - OpenAI Agent Builder compatible",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# Add CORS middleware - required for browser-based clients like OpenAI Agent Builder
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for MCP compatibility
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Add middleware
