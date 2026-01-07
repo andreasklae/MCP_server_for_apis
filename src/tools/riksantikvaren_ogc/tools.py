@@ -5,15 +5,15 @@ from typing import Any
 
 from src.mcp.models import TextContent
 from src.mcp.registry import ToolRegistry
-from src.tools.riksantikvaren_ogc.client import get_client
+from src.tools.riksantikvaren_ogc.client import get_client, AVAILABLE_DATASETS
 
 logger = logging.getLogger(__name__)
 
 
 def format_feature(feature: dict[str, Any], index: int = 0) -> str:
     """Format a GeoJSON feature for display."""
-    props = feature.get("properties", {})
-    geometry = feature.get("geometry", {})
+    props = feature.get("properties", {}) or {}
+    geometry = feature.get("geometry", {}) or {}
     
     # Try to get a name from various possible fields
     name = (
@@ -29,47 +29,91 @@ def format_feature(feature: dict[str, Any], index: int = 0) -> str:
     # Add key properties
     if props.get("kategori"):
         lines.append(f"  Kategori: {props['kategori']}")
+    if props.get("kulturminneKategori"):
+        lines.append(f"  Kategori: {props['kulturminneKategori']}")
     if props.get("kommune"):
         lines.append(f"  Kommune: {props['kommune']}")
     if props.get("fylke"):
         lines.append(f"  Fylke: {props['fylke']}")
     if props.get("vernestatus"):
         lines.append(f"  Vernestatus: {props['vernestatus']}")
+    if props.get("vernetype"):
+        lines.append(f"  Vernetype: {props['vernetype']}")
     if props.get("datering"):
         lines.append(f"  Datering: {props['datering']}")
+    if props.get("kulturminneDatering"):
+        lines.append(f"  Datering: {props['kulturminneDatering']}")
     if props.get("beskrivelse"):
         desc = props["beskrivelse"][:200] + "..." if len(props.get("beskrivelse", "")) > 200 else props.get("beskrivelse", "")
         lines.append(f"  Beskrivelse: {desc}")
     
+    # Add ID and links
+    feature_id = feature.get("id") or props.get("lokalId")
+    if feature_id:
+        lines.append(f"  ID: {feature_id}")
+    
+    if props.get("linkKulturminnesok"):
+        lines.append(f"  Lenke: {props['linkKulturminnesok']}")
+    elif props.get("lenke"):
+        lines.append(f"  Lenke: {props['lenke']}")
+    
     # Add coordinates if available
     if geometry.get("type") == "Point" and geometry.get("coordinates"):
         coords = geometry["coordinates"]
-        lines.append(f"  Koordinater: {coords[1]:.5f}, {coords[0]:.5f}")
-    
-    # Add link if available
-    if props.get("lenke"):
-        lines.append(f"  Lenke: {props['lenke']}")
+        if coords and len(coords) >= 2:
+            lines.append(f"  Koordinater: {coords[1]:.5f}, {coords[0]:.5f}")
     
     return "\n".join(lines)
 
 
-async def collections_handler(arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle riksantikvaren-collections tool call."""
+async def datasets_handler(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle riksantikvaren-datasets tool call."""
     try:
         client = get_client()
-        collections = await client.list_collections()
+        datasets = await client.list_datasets()
+
+        if not datasets:
+            return [TextContent(text="No datasets found")]
+
+        lines = ["# Available Riksantikvaren Datasets\n"]
+        lines.append("The Riksantikvaren OGC API provides several datasets:\n")
+        
+        for ds in datasets:
+            ds_id = ds.get("id", "unknown")
+            title = ds.get("title", ds_id)
+            lines.append(f"## {title}")
+            lines.append(f"- **ID:** `{ds_id}`")
+            lines.append(f"- **URL:** {ds.get('landingPageUri', 'N/A')}")
+            lines.append("")
+
+        lines.append("\nUse `riksantikvaren-collections` with a dataset to see its collections.")
+        return [TextContent(text="\n".join(lines))]
+
+    except Exception as e:
+        logger.exception("Riksantikvaren datasets error")
+        return [TextContent(text=f"Error listing datasets: {str(e)}")]
+
+
+async def collections_handler(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle riksantikvaren-collections tool call."""
+    dataset_id = arguments.get("dataset", "kulturminner")
+    
+    try:
+        client = get_client()
+        collections = await client.list_collections(dataset_id=dataset_id)
 
         if not collections:
-            return [TextContent(text="No collections found")]
+            return [TextContent(text=f"No collections found in dataset '{dataset_id}'")]
 
-        lines = [f"Available Riksantikvaren data collections ({len(collections)}):\n"]
+        lines = [f"# Collections in '{dataset_id}' ({len(collections)}):\n"]
         for coll in collections:
             coll_id = coll.get("id", "unknown")
             title = coll.get("title", coll_id)
             desc = coll.get("description", "")
-            lines.append(f"- **{coll_id}**: {title}")
+            lines.append(f"## {title}")
+            lines.append(f"- **ID:** `{coll_id}`")
             if desc:
-                lines.append(f"  {desc[:100]}...")
+                lines.append(f"- **Description:** {desc[:200]}...")
             lines.append("")
 
         return [TextContent(text="\n".join(lines))]
@@ -81,6 +125,7 @@ async def collections_handler(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def features_handler(arguments: dict[str, Any]) -> list[TextContent]:
     """Handle riksantikvaren-features tool call."""
+    dataset_id = arguments.get("dataset", "kulturminner")
     collection_id = arguments.get("collection", "kulturminner")
     limit = arguments.get("limit", 20)
     
@@ -100,15 +145,20 @@ async def features_handler(arguments: dict[str, Any]) -> list[TextContent]:
 
     try:
         client = get_client()
-        result = await client.get_features(collection_id, bbox=bbox, limit=limit)
+        result = await client.get_features(
+            dataset_id=dataset_id,
+            collection_id=collection_id,
+            bbox=bbox,
+            limit=limit,
+        )
 
         features = result.get("features", [])
         total = result.get("numberMatched", len(features))
 
         if not features:
-            return [TextContent(text=f"No features found in collection '{collection_id}'")]
+            return [TextContent(text=f"No features found in '{dataset_id}/{collection_id}'")]
 
-        lines = [f"Found {total} features in '{collection_id}' (showing {len(features)}):\n"]
+        lines = [f"Found {total} cultural heritage sites in '{collection_id}' (showing {len(features)}):\n"]
         for i, feature in enumerate(features, 1):
             lines.append(f"{i}. {format_feature(feature, i)}")
             lines.append("")
@@ -122,6 +172,7 @@ async def features_handler(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def feature_handler(arguments: dict[str, Any]) -> list[TextContent]:
     """Handle riksantikvaren-feature tool call."""
+    dataset_id = arguments.get("dataset", "kulturminner")
     collection_id = arguments.get("collection", "kulturminner")
     feature_id = arguments.get("feature_id", "")
     
@@ -130,14 +181,18 @@ async def feature_handler(arguments: dict[str, Any]) -> list[TextContent]:
 
     try:
         client = get_client()
-        feature = await client.get_feature(collection_id, feature_id)
+        feature = await client.get_feature(
+            feature_id=feature_id,
+            dataset_id=dataset_id,
+            collection_id=collection_id,
+        )
 
         if not feature:
             return [TextContent(text=f"Feature not found: {feature_id}")]
 
         # Format the feature with all properties
-        props = feature.get("properties", {})
-        geometry = feature.get("geometry", {})
+        props = feature.get("properties", {}) or {}
+        geometry = feature.get("geometry", {}) or {}
         
         name = props.get("navn") or props.get("tittel") or f"Feature {feature_id}"
         lines = [f"# {name}\n"]
@@ -152,7 +207,8 @@ async def feature_handler(arguments: dict[str, Any]) -> list[TextContent]:
             lines.append(f"\n**Geometry type:** {geometry.get('type', 'Unknown')}")
             if geometry.get("type") == "Point" and geometry.get("coordinates"):
                 coords = geometry["coordinates"]
-                lines.append(f"**Coordinates:** {coords[1]:.6f}, {coords[0]:.6f}")
+                if coords and len(coords) >= 2:
+                    lines.append(f"**Coordinates:** {coords[1]:.6f}, {coords[0]:.6f}")
 
         return [TextContent(text="\n".join(lines))]
 
@@ -169,6 +225,7 @@ async def nearby_handler(arguments: dict[str, Any]) -> list[TextContent]:
     if lat is None or lon is None:
         return [TextContent(text="Error: 'latitude' and 'longitude' arguments are required")]
 
+    dataset_id = arguments.get("dataset", "kulturminner")
     collection_id = arguments.get("collection", "kulturminner")
     radius = arguments.get("radius", 1000)  # meters
     limit = arguments.get("limit", 20)
@@ -180,8 +237,12 @@ async def nearby_handler(arguments: dict[str, Any]) -> list[TextContent]:
     try:
         client = get_client()
         result = await client.search_nearby(
-            lat, lon, radius_deg=radius_deg, 
-            collection_id=collection_id, limit=limit
+            lat=lat,
+            lon=lon,
+            radius_deg=radius_deg, 
+            dataset_id=dataset_id,
+            collection_id=collection_id,
+            limit=limit,
         )
 
         features = result.get("features", [])
@@ -207,11 +268,28 @@ def register_tools(registry: ToolRegistry) -> None:
     """Register Riksantikvaren OGC tools with the registry."""
 
     registry.register(
-        name="riksantikvaren-collections",
-        description="List available data collections from Riksantikvaren (Norwegian cultural heritage). Collections include 'kulturminner' (heritage sites) and 'brukeminner' (user-contributed).",
+        name="riksantikvaren-datasets",
+        description="List available datasets from Riksantikvaren OGC API. Datasets include kulturminner (heritage sites), kulturmiljoer (environments), brukerminner (user memories), and more.",
         input_schema={
             "type": "object",
             "properties": {},
+            "required": [],
+        },
+        handler=datasets_handler,
+    )
+
+    registry.register(
+        name="riksantikvaren-collections",
+        description="List collections within a Riksantikvaren dataset. Default dataset is 'kulturminner'.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "dataset": {
+                    "type": "string",
+                    "description": "Dataset ID (e.g., 'kulturminner', 'kulturmiljoer', 'brukerminner')",
+                    "default": "kulturminner",
+                },
+            },
             "required": [],
         },
         handler=collections_handler,
@@ -219,13 +297,18 @@ def register_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="riksantikvaren-features",
-        description="Query cultural heritage features from Riksantikvaren. Can filter by bounding box.",
+        description="Query cultural heritage features from Riksantikvaren's Askeladden database. Can filter by bounding box. Default searches kulturminner (over 600,000 heritage sites in Norway).",
         input_schema={
             "type": "object",
             "properties": {
+                "dataset": {
+                    "type": "string",
+                    "description": "Dataset ID",
+                    "default": "kulturminner",
+                },
                 "collection": {
                     "type": "string",
-                    "description": "Collection ID (e.g., 'kulturminner', 'brukeminner')",
+                    "description": "Collection ID within the dataset",
                     "default": "kulturminner",
                 },
                 "bbox": {
@@ -234,7 +317,7 @@ def register_tools(registry: ToolRegistry) -> None:
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum features to return",
+                    "description": "Maximum features to return (max 100)",
                     "default": 20,
                 },
             },
@@ -245,13 +328,18 @@ def register_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="riksantikvaren-feature",
-        description="Get detailed information about a specific cultural heritage feature by ID.",
+        description="Get detailed information about a specific cultural heritage site by its ID.",
         input_schema={
             "type": "object",
             "properties": {
                 "feature_id": {
                     "type": "string",
                     "description": "Feature ID",
+                },
+                "dataset": {
+                    "type": "string",
+                    "description": "Dataset ID",
+                    "default": "kulturminner",
                 },
                 "collection": {
                     "type": "string",
@@ -266,7 +354,7 @@ def register_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="riksantikvaren-nearby",
-        description="Find cultural heritage sites near geographic coordinates. Returns sites from Riksantikvaren's Askeladden database.",
+        description="Find cultural heritage sites near geographic coordinates. Searches Riksantikvaren's Askeladden database of Norwegian heritage sites including Viking age finds, medieval churches, rock carvings, burial mounds, and more.",
         input_schema={
             "type": "object",
             "properties": {
@@ -283,6 +371,11 @@ def register_tools(registry: ToolRegistry) -> None:
                     "description": "Search radius in meters",
                     "default": 1000,
                 },
+                "dataset": {
+                    "type": "string",
+                    "description": "Dataset ID",
+                    "default": "kulturminner",
+                },
                 "collection": {
                     "type": "string",
                     "description": "Collection ID",
@@ -290,7 +383,7 @@ def register_tools(registry: ToolRegistry) -> None:
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum results",
+                    "description": "Maximum results (max 100)",
                     "default": 20,
                 },
             },

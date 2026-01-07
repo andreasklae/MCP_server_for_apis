@@ -8,29 +8,84 @@ from src.utils.http import create_http_client
 logger = logging.getLogger(__name__)
 
 
+# Available datasets on the Riksantikvaren OGC API
+AVAILABLE_DATASETS = {
+    "kulturminner": {
+        "title": "Kulturminner",
+        "description": "All cultural heritage sites registered in Askeladden",
+        "collections": ["kulturminner", "sikringssoner"],
+    },
+    "kulturmiljoer": {
+        "title": "Kulturmiljøer",
+        "description": "Protected cultural environments and world heritage sites",
+        "collections": ["kulturmiljoer"],
+    },
+    "brukerminner": {
+        "title": "Brukerminner",
+        "description": "User-contributed cultural memories",
+        "collections": ["brukerminner"],
+    },
+    "KulturminnerFredaBygninger": {
+        "title": "Freda bygninger",
+        "description": "Protected buildings",
+        "collections": ["fredabygninger"],
+    },
+    "KulturminnerSEFRAKbygninger": {
+        "title": "SEFRAK-bygninger",
+        "description": "SEFRAK registered buildings (pre-1900)",
+        "collections": ["sefrakbygninger"],
+    },
+    "brannvern": {
+        "title": "Brannvern",
+        "description": "Fire protection areas",
+        "collections": ["brannvern"],
+    },
+}
+
+
 class RiksantikvarenOGCClient:
     """Client for the Riksantikvaren OGC API Features."""
 
     BASE_URL = "https://api.ra.no"
 
-    async def list_collections(self) -> list[dict[str, Any]]:
+    async def list_datasets(self) -> list[dict[str, Any]]:
         """
-        List available data collections.
+        List available datasets (APIs).
+        
+        Returns:
+            List of dataset metadata
+        """
+        async with create_http_client(timeout=60) as client:
+            response = await client.get(f"{self.BASE_URL}", params={"f": "json"})
+            response.raise_for_status()
+            data = response.json()
+            return data.get("apis", [])
+
+    async def list_collections(self, dataset_id: str = "kulturminner") -> list[dict[str, Any]]:
+        """
+        List available collections within a dataset.
+        
+        Args:
+            dataset_id: Dataset identifier (e.g., 'kulturminner', 'kulturmiljoer')
         
         Returns:
             List of collection metadata
         """
         async with create_http_client(timeout=60) as client:
-            response = await client.get(f"{self.BASE_URL}/collections", params={"f": "json"})
+            response = await client.get(
+                f"{self.BASE_URL}/{dataset_id}/collections",
+                params={"f": "json"}
+            )
             response.raise_for_status()
             data = response.json()
             return data.get("collections", [])
 
-    async def get_collection(self, collection_id: str) -> dict[str, Any]:
+    async def get_collection(self, dataset_id: str, collection_id: str) -> dict[str, Any]:
         """
         Get metadata for a specific collection.
         
         Args:
+            dataset_id: Dataset identifier
             collection_id: Collection identifier
         
         Returns:
@@ -38,7 +93,7 @@ class RiksantikvarenOGCClient:
         """
         async with create_http_client(timeout=60) as client:
             response = await client.get(
-                f"{self.BASE_URL}/collections/{collection_id}",
+                f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}",
                 params={"f": "json"}
             )
             response.raise_for_status()
@@ -46,7 +101,8 @@ class RiksantikvarenOGCClient:
 
     async def get_features(
         self,
-        collection_id: str,
+        dataset_id: str = "kulturminner",
+        collection_id: str = "kulturminner",
         bbox: tuple[float, float, float, float] | None = None,
         limit: int = 50,
         offset: int = 0,
@@ -55,7 +111,8 @@ class RiksantikvarenOGCClient:
         Query features from a collection.
         
         Args:
-            collection_id: Collection identifier
+            dataset_id: Dataset identifier (default: 'kulturminner')
+            collection_id: Collection identifier (default: 'kulturminner')
             bbox: Bounding box as (min_lon, min_lat, max_lon, max_lat)
             limit: Maximum features to return
             offset: Pagination offset
@@ -74,26 +131,32 @@ class RiksantikvarenOGCClient:
 
         async with create_http_client(timeout=60) as client:
             response = await client.get(
-                f"{self.BASE_URL}/collections/{collection_id}/items",
+                f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}/items",
                 params=params
             )
             response.raise_for_status()
             return response.json()
 
-    async def get_feature(self, collection_id: str, feature_id: str) -> dict[str, Any]:
+    async def get_feature(
+        self,
+        feature_id: str,
+        dataset_id: str = "kulturminner",
+        collection_id: str = "kulturminner",
+    ) -> dict[str, Any]:
         """
         Get a single feature by ID.
         
         Args:
-            collection_id: Collection identifier
             feature_id: Feature identifier
+            dataset_id: Dataset identifier
+            collection_id: Collection identifier
         
         Returns:
             GeoJSON Feature
         """
         async with create_http_client(timeout=60) as client:
             response = await client.get(
-                f"{self.BASE_URL}/collections/{collection_id}/items/{feature_id}",
+                f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}/items/{feature_id}",
                 params={"f": "json"}
             )
             response.raise_for_status()
@@ -104,6 +167,7 @@ class RiksantikvarenOGCClient:
         lat: float,
         lon: float,
         radius_deg: float = 0.01,  # ~1km at 60°N
+        dataset_id: str = "kulturminner",
         collection_id: str = "kulturminner",
         limit: int = 20,
     ) -> dict[str, Any]:
@@ -114,6 +178,7 @@ class RiksantikvarenOGCClient:
             lat: Latitude
             lon: Longitude
             radius_deg: Search radius in degrees (approx 0.01 = 1km)
+            dataset_id: Dataset to search
             collection_id: Collection to search
             limit: Maximum results
         
@@ -126,7 +191,12 @@ class RiksantikvarenOGCClient:
             lon + radius_deg,
             lat + radius_deg,
         )
-        return await self.get_features(collection_id, bbox=bbox, limit=limit)
+        return await self.get_features(
+            dataset_id=dataset_id,
+            collection_id=collection_id,
+            bbox=bbox,
+            limit=limit,
+        )
 
 
 # Singleton client

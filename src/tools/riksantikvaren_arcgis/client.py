@@ -202,27 +202,39 @@ def get_client() -> RiksantikvarenArcGISClient:
     return _client
 
 
-# Common service/layer configurations
-COMMON_LAYERS = {
-    "Kulturminner": {
-        "description": "Cultural heritage sites from Askeladden",
+# Available services in the Distribusjon folder
+AVAILABLE_SERVICES = {
+    "Kulturminner20180301": {
+        "description": "All cultural heritage sites from Askeladden (2018 dataset)",
         "layers": {
-            0: "Points",
-            1: "Lines",
-            2: "Polygons",
+            0: "Bygninger (Buildings)",
+            1: "FredaBygninger (Protected buildings)",
+            2: "SefrakBygninger (SEFRAK buildings)",
+            3: "Kulturminner (Heritage sites - icons)",
+            4: "Enkeltminneikoner (Single monuments - icons)",
+            5: "Lokalitetsikoner (Localities - icons)",
+            6: "Enkeltminner (Single monuments - polygons)",  # Best for queries
+            7: "Lokaliteter (Localities - polygons)",
+            8: "Sikringssoner (Protection zones)",
+            9: "Brannvern (Fire protection)",
+            10: "Brannsmitteomradeikoner (Fire spread areas - icons)",
+            11: "VerneverdigTetteTrehusmiljoikoner (Preservation areas - icons)",
+            12: "Brannsmitteomrader (Fire spread areas)",
+            13: "VerneverdigTetteTrehusmiljoer (Preservation areas)",
+            14: "Kulturmiljoer (Cultural environments)",
+            15: "Kulturmiljoer_flate (Cultural environments - polygons)",
+            16: "Kulturmiljoikoner (Cultural environments - icons)",
         }
     },
-    "Fredete": {
-        "description": "Protected cultural heritage sites",
+    "FjernmalteArkeologiskeKulturminner": {
+        "description": "Remotely sensed archaeological heritage sites",
         "layers": {
-            0: "Fredete kulturminner",
-        }
-    },
-    "Brukeminner": {
-        "description": "User-contributed cultural memories",
-        "layers": {
-            0: "Brukeminner",
+            0: "Fjernmålte arkeologiske kulturminner",
         }
     },
 }
+
+# Default service and layer for queries
+DEFAULT_SERVICE = "Kulturminner20180301"
+DEFAULT_LAYER = 6  # Enkeltminner - has the best data
 
