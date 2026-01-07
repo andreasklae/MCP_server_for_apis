@@ -77,7 +77,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add CORS middleware - required for browser-based clients like OpenAI Agent Builder
+# Add middleware in reverse order (last added = first to process incoming requests)
+# So we add: RateLimitMiddleware, AuthMiddleware, then CORS (CORS needs to be LAST to process FIRST)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(AuthMiddleware)
+
+# CORS must be added LAST so it processes incoming requests FIRST (handles OPTIONS preflight)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins for MCP compatibility
@@ -86,10 +91,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
-
-# Add middleware
-app.add_middleware(AuthMiddleware)
-app.add_middleware(RateLimitMiddleware)
 
 
 # Request ID middleware
