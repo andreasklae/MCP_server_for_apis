@@ -3,29 +3,25 @@
 # This file controls which API providers are enabled and their settings.
 
 # Which providers to load on startup
-# Add/remove providers here to control what tools are available
 enabled_providers:
   - example
-  # Uncomment these as you implement them:
-  # - wikipedia
-  # - snl
-  # - riksantikvaren_ogc
-  # - riksantikvaren_arcgis
+  - wikipedia
+  - snl
+  - riksantikvaren_ogc
+  - riksantikvaren_arcgis
 
 # Provider-specific settings (optional overrides)
 providers:
   example:
-    # The example provider has no external dependencies
     enabled: true
 
   wikipedia:
     default_language: "no"  # Norwegian Wikipedia by default
     timeout: 30
-    base_url: "https://{language}.wikipedia.org/w/api.php"
 
   snl:
     timeout: 30
-    base_url: "https://snl.no/api/v1/"
+    base_url: "https://snl.no"
 
   riksantikvaren_ogc:
     base_url: "https://api.ra.no/"
@@ -36,4 +32,3 @@ providers:
     base_url: "https://kart.ra.no/arcgis/rest/services/Distribusjon"
     timeout: 60
     default_spatial_ref: 4326  # WGS84
-

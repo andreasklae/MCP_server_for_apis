@@ -106,12 +106,39 @@ enabled_providers:
 
 ## Available Tools
 
+### Example Tools
 | Tool | Description |
 |------|-------------|
 | `example-ping` | Test if the server is working |
 | `example-echo` | Echo back a message |
 
-*Additional tools are added when you implement the Wikipedia, SNL, and Riksantikvaren providers.*
+### Wikipedia Tools
+| Tool | Description |
+|------|-------------|
+| `wikipedia-search` | Search Wikipedia for articles |
+| `wikipedia-summary` | Get article summary by title |
+| `wikipedia-geosearch` | Find articles near coordinates |
+
+### Store Norske Leksikon (SNL) Tools
+| Tool | Description |
+|------|-------------|
+| `snl-search` | Search the Norwegian encyclopedia |
+| `snl-article` | Get full article by ID or slug |
+
+### Riksantikvaren OGC Tools
+| Tool | Description |
+|------|-------------|
+| `riksantikvaren-collections` | List available data collections |
+| `riksantikvaren-features` | Query features with optional bbox |
+| `riksantikvaren-feature` | Get single feature by ID |
+| `riksantikvaren-nearby` | Find heritage sites near coordinates |
+
+### Riksantikvaren ArcGIS Tools
+| Tool | Description |
+|------|-------------|
+| `arcgis-services` | List available map services |
+| `arcgis-query` | Query features with SQL or bbox |
+| `arcgis-nearby` | Find sites near coordinates |
 
 ## Adding a New API Provider
 
@@ -237,6 +264,107 @@ curl -X POST http://localhost:8000/message \
 ```bash
 curl -N http://localhost:8000/sse
 ```
+
+## Deployment to Azure Container Apps
+
+### One-time Azure Setup
+
+1. **Install Azure CLI:**
+   ```bash
+   # macOS
+   brew install azure-cli
+   
+   # Or download from https://docs.microsoft.com/cli/azure/install-azure-cli
+   ```
+
+2. **Login and set up resources:**
+   ```bash
+   # Login
+   az login
+   
+   # Create resource group (choose your region)
+   az group create --name kulturarv-rg --location northeurope
+   
+   # Create Container Registry
+   az acr create --resource-group kulturarv-rg \
+     --name kulturarvacr --sku Basic
+   
+   # Enable admin access for the registry
+   az acr update --name kulturarvacr --admin-enabled true
+   
+   # Get registry credentials
+   az acr credential show --name kulturarvacr
+   
+   # Create Container Apps environment
+   az containerapp env create \
+     --name kulturarv-env \
+     --resource-group kulturarv-rg \
+     --location northeurope
+   
+   # Create the Container App
+   az containerapp create \
+     --name kulturarv-mcp-server \
+     --resource-group kulturarv-rg \
+     --environment kulturarv-env \
+     --image kulturarvacr.azurecr.io/kulturarv-mcp-server:latest \
+     --target-port 8000 \
+     --ingress external \
+     --registry-server kulturarvacr.azurecr.io \
+     --registry-username kulturarvacr \
+     --registry-password <password-from-above> \
+     --env-vars \
+       LOG_LEVEL=INFO \
+       LOG_FORMAT=json \
+       RATE_LIMIT_ENABLED=true \
+       RATE_LIMIT_PER_MINUTE=60
+   ```
+
+3. **Set auth token (optional):**
+   ```bash
+   az containerapp update \
+     --name kulturarv-mcp-server \
+     --resource-group kulturarv-rg \
+     --set-env-vars MCP_AUTH_TOKEN=your-secret-token
+   ```
+
+### GitHub Actions Setup
+
+Add these secrets to your GitHub repository (Settings → Secrets → Actions):
+
+| Secret | Description |
+|--------|-------------|
+| `AZURE_CONTAINER_REGISTRY` | Registry URL (e.g., `kulturarvacr.azurecr.io`) |
+| `REGISTRY_USERNAME` | Registry username |
+| `REGISTRY_PASSWORD` | Registry password |
+| `AZURE_RESOURCE_GROUP` | Resource group name (e.g., `kulturarv-rg`) |
+| `AZURE_CREDENTIALS` | Service principal JSON (see below) |
+
+**Create service principal for GitHub Actions:**
+```bash
+az ad sp create-for-rbac \
+  --name "github-actions-kulturarv" \
+  --role contributor \
+  --scopes /subscriptions/<subscription-id>/resourceGroups/kulturarv-rg \
+  --sdk-auth
+```
+Copy the JSON output to the `AZURE_CREDENTIALS` secret.
+
+### Manual Deployment
+
+```bash
+# Build and push image
+az acr build --registry kulturarvacr \
+  --image kulturarv-mcp-server:latest \
+  ./MCP_server_for_apis
+
+# Update the container app
+az containerapp update \
+  --name kulturarv-mcp-server \
+  --resource-group kulturarv-rg \
+  --image kulturarvacr.azurecr.io/kulturarv-mcp-server:latest
+```
+
+Push to `main` branch to trigger automatic deployment via GitHub Actions.
 
 ## Limitations
 
