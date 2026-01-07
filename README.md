@@ -412,3 +412,4 @@ MIT
 - [OpenAI MCP Documentation](https://platform.openai.com/docs/mcp)
 - [Riksantikvaren APIs](https://api.ra.no/)
 
+
