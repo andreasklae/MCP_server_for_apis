@@ -59,11 +59,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         settings = get_settings()
         
+        path = request.url.path
+        logger.debug(
+            f"Auth check: path={path}, auth_enabled={settings.auth_enabled}, "
+            f"token_set={bool(settings.mcp_auth_token)}"
+        )
+        
         # Skip auth if not enabled
         if not settings.auth_enabled:
+            logger.debug("Auth disabled, skipping")
             return await call_next(request)
-        
-        path = request.url.path
         
         # Allow public paths
         if any(path.startswith(p) for p in self.PUBLIC_PATHS):

@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "Starting MCP server",
         server_name=settings.server_name,
         version=settings.server_version,
+        auth_enabled=settings.auth_enabled,
     )
     
     # Load API configuration and register tools
