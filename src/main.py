@@ -116,6 +116,20 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/debug/auth")
+async def debug_auth() -> dict:
+    """Debug endpoint to check auth status (remove in production)."""
+    import os
+    settings = get_settings()
+    return {
+        "auth_enabled": settings.auth_enabled,
+        "token_length": len(settings.mcp_auth_token) if settings.mcp_auth_token else 0,
+        "token_set": bool(settings.mcp_auth_token),
+        "env_var_set": bool(os.environ.get("MCP_AUTH_TOKEN")),
+        "env_var_length": len(os.environ.get("MCP_AUTH_TOKEN", "")),
+    }
+
+
 @app.get("/")
 async def root() -> dict:
     """Root endpoint with server info."""
