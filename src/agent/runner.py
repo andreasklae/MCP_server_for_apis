@@ -99,7 +99,7 @@ class AgentRunner:
             if not tool:
                 return json.dumps({"error": f"Tool '{tool_name}' not found"})
             
-            result = await tool.handler(**arguments)
+            result = await tool.handler(arguments)
             
             # Handle different result types
             if isinstance(result, dict):
