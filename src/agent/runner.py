@@ -4,10 +4,11 @@ import json
 import logging
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 from pydantic import BaseModel, Field
 
 from src.mcp.registry import get_registry
+from src.config.loader import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +65,24 @@ class AgentRunner:
     """Runs the chat agent with tool calling."""
     
     def __init__(self, openai_api_key: str):
-        """Initialize with OpenAI API key."""
-        self.client = OpenAI(api_key=openai_api_key)
+        """Initialize with OpenAI API key (works with both OpenAI and Azure OpenAI)."""
+        settings = get_settings()
+        
+        if settings.use_azure_openai:
+            # Use Azure OpenAI
+            logger.info(f"Using Azure OpenAI: {settings.azure_openai_endpoint}")
+            self.client = AzureOpenAI(
+                api_key=openai_api_key,
+                api_version=settings.azure_openai_api_version,
+                azure_endpoint=settings.azure_openai_endpoint,
+            )
+            self.model = settings.azure_openai_deployment
+        else:
+            # Use OpenAI direct
+            logger.info("Using OpenAI direct API")
+            self.client = OpenAI(api_key=openai_api_key)
+            self.model = "gpt-4o"
+        
         self.registry = get_registry()
     
     def _get_enabled_tools(self, sources: list[str]) -> list[dict[str, Any]]:
@@ -148,7 +165,7 @@ class AgentRunner:
         # Call OpenAI with tools
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o",  # Using gpt-4o for good balance of quality and cost
+                model=self.model,
                 messages=messages,
                 tools=tools if tools else None,
                 tool_choice="auto" if tools else None,
@@ -213,7 +230,7 @@ class AgentRunner:
             # Get next response
             try:
                 response = self.client.chat.completions.create(
-                    model="gpt-4o",
+                    model=self.model,
                     messages=messages,
                     tools=tools if tools else None,
                     tool_choice="auto" if tools else None,

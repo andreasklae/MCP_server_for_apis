@@ -14,8 +14,13 @@ class Settings(BaseSettings):
     # Authentication
     mcp_auth_token: str = ""
     
-    # OpenAI API (for chat agent)
+    # OpenAI API (for chat agent) - supports both direct OpenAI and Azure OpenAI
     openai_api_key: str = ""
+    
+    # Azure OpenAI settings (if using Azure instead of OpenAI direct)
+    azure_openai_endpoint: str = ""  # e.g., https://your-resource.openai.azure.com
+    azure_openai_deployment: str = "gpt-4o"  # deployment name in Azure
+    azure_openai_api_version: str = "2024-02-15-preview"
 
     # Rate limiting
     rate_limit_enabled: bool = False
@@ -54,8 +59,13 @@ class Settings(BaseSettings):
     
     @property
     def chat_enabled(self) -> bool:
-        """Check if chat agent is enabled (OpenAI key is set)."""
+        """Check if chat agent is enabled (OpenAI or Azure OpenAI configured)."""
         return bool(self.openai_api_key)
+    
+    @property
+    def use_azure_openai(self) -> bool:
+        """Check if Azure OpenAI should be used instead of direct OpenAI."""
+        return bool(self.azure_openai_endpoint)
 
 
 @lru_cache
