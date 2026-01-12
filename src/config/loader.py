@@ -1,6 +1,5 @@
 """Configuration loading from environment and YAML files."""
 
-import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -14,10 +13,16 @@ class Settings(BaseSettings):
 
     # Authentication
     mcp_auth_token: str = ""
+    
+    # OpenAI API (for chat agent)
+    openai_api_key: str = ""
 
     # Rate limiting
     rate_limit_enabled: bool = False
     rate_limit_per_minute: int = 60
+    
+    # Chat rate limiting (separate from MCP rate limiting)
+    chat_rate_limit_per_hour: int = 50  # Messages per hour per IP
 
     # Logging
     log_level: str = "INFO"
@@ -46,6 +51,11 @@ class Settings(BaseSettings):
     def auth_enabled(self) -> bool:
         """Check if authentication is enabled."""
         return bool(self.mcp_auth_token)
+    
+    @property
+    def chat_enabled(self) -> bool:
+        """Check if chat agent is enabled (OpenAI key is set)."""
+        return bool(self.openai_api_key)
 
 
 @lru_cache

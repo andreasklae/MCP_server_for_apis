@@ -2,6 +2,8 @@
 
 import json
 import logging
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -218,6 +220,122 @@ async def message_endpoint(request: Request) -> JSONResponse:
             await session.send_event("message", json.dumps(response_data))
     
     return JSONResponse(content=response_data)
+
+
+# =============================================================================
+# Chat API Endpoint
+# =============================================================================
+
+# Simple in-memory rate limiter for chat (per IP)
+chat_rate_limits: dict[str, list[float]] = defaultdict(list)
+
+
+def check_chat_rate_limit(client_ip: str) -> bool:
+    """Check if client IP is within rate limit. Returns True if allowed."""
+    settings = get_settings()
+    now = time.time()
+    hour_ago = now - 3600
+    
+    # Clean old entries
+    chat_rate_limits[client_ip] = [
+        t for t in chat_rate_limits[client_ip] if t > hour_ago
+    ]
+    
+    # Check limit
+    if len(chat_rate_limits[client_ip]) >= settings.chat_rate_limit_per_hour:
+        return False
+    
+    # Record this request
+    chat_rate_limits[client_ip].append(now)
+    return True
+
+
+@app.post("/api/chat")
+async def chat_endpoint(request: Request) -> JSONResponse:
+    """
+    Chat endpoint for the AI agent.
+    
+    Requires MCP auth token in Authorization header.
+    Rate limited per IP to control OpenAI costs.
+    """
+    settings = get_settings()
+    
+    # Check if chat is enabled
+    if not settings.chat_enabled:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Chat service not configured"}
+        )
+    
+    # Get client IP for rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    
+    # Check rate limit
+    if not check_chat_rate_limit(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "Rate limit exceeded",
+                "message": f"Maximum {settings.chat_rate_limit_per_hour} messages per hour"
+            }
+        )
+    
+    # Parse request body
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid JSON: {e}"}
+        )
+    
+    # Import here to avoid circular imports
+    from src.agent.runner import AgentRunner, ChatRequest
+    
+    try:
+        chat_request = ChatRequest(**body)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid request: {e}"}
+        )
+    
+    # Run the agent
+    log = get_logger("chat")
+    log.info("Chat request", message_length=len(chat_request.message), sources=chat_request.sources)
+    
+    try:
+        runner = AgentRunner(settings.openai_api_key)
+        response = await runner.chat(chat_request)
+        
+        log.info(
+            "Chat response",
+            tools_used=response.tools_used,
+            sources_consulted=response.sources_consulted,
+        )
+        
+        return JSONResponse(content=response.model_dump())
+        
+    except Exception as e:
+        log.error("Chat error", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Chat processing failed: {str(e)}"}
+        )
+
+
+@app.get("/api/chat/status")
+async def chat_status() -> dict:
+    """Check if chat is available and get configuration."""
+    settings = get_settings()
+    return {
+        "enabled": settings.chat_enabled,
+        "rate_limit_per_hour": settings.chat_rate_limit_per_hour,
+        "sources_available": ["wikipedia", "snl", "riksantikvaren"],
+    }
 
 
 # =============================================================================

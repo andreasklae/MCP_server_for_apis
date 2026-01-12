@@ -46,13 +46,20 @@ def extract_bearer_token(authorization: str | None) -> str | None:
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Middleware to enforce authentication on MCP endpoints."""
+    """Middleware to enforce authentication on protected endpoints."""
     
     # Paths that require authentication (when enabled)
-    PROTECTED_PATHS = ["/sse", "/message"]
+    PROTECTED_PATHS = ["/sse", "/message", "/api/chat"]
     
-    # Paths that are always public
-    PUBLIC_PATHS = ["/health", "/", "/docs", "/openapi.json", "/redoc"]
+    # Paths that are always public (no auth required)
+    PUBLIC_PATHS = [
+        "/health",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/api/chat/status",
+        "/debug",
+    ]
     
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Response]
@@ -77,17 +84,30 @@ class AuthMiddleware(BaseHTTPMiddleware):
             
             if not verify_auth_token(token):
                 logger.warning(f"Unauthorized access attempt to {path}")
-                return JSONResponse(
-                    status_code=401,
-                    content={
-                        "jsonrpc": "2.0",
-                        "id": None,
-                        "error": {
-                            "code": -32001,
-                            "message": "Authentication required",
+                
+                # Return appropriate error format based on endpoint
+                if path.startswith("/api/"):
+                    # REST API format
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "error": "Authentication required",
+                            "message": "Please provide a valid API token in the Authorization header",
                         },
-                    },
-                )
+                    )
+                else:
+                    # MCP JSON-RPC format
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {
+                                "code": -32001,
+                                "message": "Authentication required",
+                            },
+                        },
+                    )
         
         return await call_next(request)
 
