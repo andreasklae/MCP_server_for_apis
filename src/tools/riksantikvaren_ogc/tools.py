@@ -47,15 +47,32 @@ def format_feature(feature: dict[str, Any], index: int = 0) -> str:
         desc = props["beskrivelse"][:200] + "..." if len(props.get("beskrivelse", "")) > 200 else props.get("beskrivelse", "")
         lines.append(f"  Beskrivelse: {desc}")
     
-    # Add ID and links
-    feature_id = feature.get("id") or props.get("lokalId")
+    # Add ID and links - always generate a kulturminnesok URL if we have an ID
+    feature_id = feature.get("id") or props.get("lokalId") or props.get("lokalitetId")
     if feature_id:
         lines.append(f"  ID: {feature_id}")
     
+    # Use provided link or construct one from the ID
+    # Kulturminnesøk URL format: https://www.kulturminnesok.no/kart/?id={uuid}
     if props.get("linkKulturminnesok"):
         lines.append(f"  Lenke: {props['linkKulturminnesok']}")
     elif props.get("lenke"):
         lines.append(f"  Lenke: {props['lenke']}")
+    elif feature_id:
+        # Construct kulturminnesok URL - include coordinates for map positioning if available
+        base_url = f"https://www.kulturminnesok.no/kart/?id={feature_id}"
+        
+        # Add bounds/zoom if we have coordinates for better map centering
+        if geometry.get("type") == "Point" and geometry.get("coordinates"):
+            coords = geometry["coordinates"]
+            if coords and len(coords) >= 2:
+                lon, lat = coords[0], coords[1]
+                # Create small bounding box around the point
+                delta = 0.001  # ~100m
+                bounds = f"{lat+delta},{lon+delta},{lat-delta},{lon-delta}"
+                base_url = f"https://www.kulturminnesok.no/kart/?bounds={bounds}&zoom=17&id={feature_id}"
+        
+        lines.append(f"  Lenke: {base_url}")
     
     # Add coordinates if available
     if geometry.get("type") == "Point" and geometry.get("coordinates"):
@@ -297,13 +314,13 @@ def register_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="riksantikvaren-features",
-        description="Query cultural heritage features from Riksantikvaren's Askeladden database. Can filter by bounding box. Default searches kulturminner (over 600,000 heritage sites in Norway).",
+        description="Query cultural heritage features from Riksantikvaren. Supports multiple datasets: 'kulturminner' (600k+ official heritage sites), 'brukerminner' (user-contributed memories and stories from the public), 'kulturmiljoer' (protected environments). Default is kulturminner.",
         input_schema={
             "type": "object",
             "properties": {
                 "dataset": {
                     "type": "string",
-                    "description": "Dataset ID",
+                    "description": "Dataset: 'kulturminner' (official sites), 'brukerminner' (user memories/stories), 'kulturmiljoer' (environments)",
                     "default": "kulturminner",
                 },
                 "collection": {
@@ -354,7 +371,7 @@ def register_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="riksantikvaren-nearby",
-        description="Find cultural heritage sites near geographic coordinates. Searches Riksantikvaren's Askeladden database of Norwegian heritage sites including Viking age finds, medieval churches, rock carvings, burial mounds, and more.",
+        description="Find heritage sites or user memories near coordinates. Default searches 'kulturminner' (official sites: Viking finds, churches, burial mounds). Set dataset='brukerminner' for user-contributed memories and personal stories about places.",
         input_schema={
             "type": "object",
             "properties": {
@@ -373,12 +390,12 @@ def register_tools(registry: ToolRegistry) -> None:
                 },
                 "dataset": {
                     "type": "string",
-                    "description": "Dataset ID",
+                    "description": "Dataset: 'kulturminner' (official sites), 'brukerminner' (user memories/stories)",
                     "default": "kulturminner",
                 },
                 "collection": {
                     "type": "string",
-                    "description": "Collection ID",
+                    "description": "Collection within dataset (usually same as dataset name)",
                     "default": "kulturminner",
                 },
                 "limit": {

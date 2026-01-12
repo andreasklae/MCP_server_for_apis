@@ -140,12 +140,13 @@ SOURCE_TOOL_MAP = {
 
 # System prompt for the agent - instructs to use Markdown (sources/related questions handled separately)
 SYSTEM_PROMPT = """
-You are a knowledgeable guide to Norwegian cultural heritage. You help users discover and learn about historical sites, monuments, buildings, and cultural landmarks in Norway.
+You are a knowledgeable tour guide. You help users discover and learn about historical sites, monuments, buildings, and cultural landmarks.
 
 You have access to several data sources:
 - **Wikipedia**: General encyclopedic knowledge in Norwegian and English
 - **Store norske leksikon (SNL)**: Authoritative Norwegian encyclopedia
 - **Riksantikvaren/Askeladden**: Official Norwegian cultural heritage database with 600,000+ registered sites
+- **Brukerminner**: User-contributed memories and personal stories about places (use dataset='brukerminner' in Riksantikvaren tools)
 
 When answering questions:
 1. Use the appropriate tools to find accurate information
@@ -249,38 +250,78 @@ class AgentRunner:
         self, tool_results: list[tuple[str, str, dict[str, Any]]]
     ) -> list[SourceReference]:
         """Extract source references from tool results."""
+        import re
+        
         sources = []
         seen_urls = set()
+        has_riksantikvaren = False
         
         for tool_name, result_text, arguments in tool_results:
-            # Try to extract URLs and titles from the result
+            # Determine provider
             provider = "riksantikvaren"
             if tool_name.startswith("wikipedia-"):
                 provider = "wikipedia"
             elif tool_name.startswith("snl-"):
                 provider = "snl"
             
-            # Look for URLs in the result
-            import re
-            url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+            if provider == "riksantikvaren":
+                has_riksantikvaren = True
+            
+            # Look for URLs in the result (including kulturminnesok.no links)
+            url_pattern = r'https?://[^\s<>"{}|\\^`\[\])]+[^\s<>"{}|\\^`\[\].,)]'
             urls = re.findall(url_pattern, result_text)
             
-            for url in urls[:3]:  # Limit to 3 URLs per tool
+            for url in urls[:5]:  # Limit to 5 URLs per tool
+                # Clean up URL (remove trailing punctuation)
+                url = url.rstrip('.,;:)')
+                
                 if url not in seen_urls:
                     seen_urls.add(url)
-                    # Try to extract a title
-                    title = arguments.get("query", arguments.get("identifier", "Source"))
-                    if provider == "snl":
-                        title = f"{title} – Store norske leksikon"
-                    elif provider == "wikipedia":
-                        title = f"{title} – Wikipedia"
+                    
+                    # Determine title based on URL and provider
+                    if "kulturminnesok.no" in url:
+                        # Try to extract the kulturminne name from the result text
+                        # Format: "**Name**\n  ..." followed later by "Lenke: {url}"
+                        # Look for bold name before this URL
+                        name_match = re.search(
+                            r'\*\*([^*]+)\*\*[^*]*?' + re.escape(url),
+                            result_text,
+                            re.DOTALL
+                        )
+                        if name_match:
+                            title = f"{name_match.group(1).strip()} – Kulturminnesøk"
+                        else:
+                            # Fallback: use ID from URL
+                            id_match = re.search(r'[?&]id=([a-f0-9-]+)', url)
+                            if id_match:
+                                title = f"Kulturminne – Kulturminnesøk"
+                            else:
+                                title = "Kulturminnesøk"
+                        provider = "riksantikvaren"
+                    elif "snl.no" in url:
+                        title = arguments.get("query", "Artikkel") + " – Store norske leksikon"
+                        provider = "snl"
+                    elif "wikipedia.org" in url:
+                        title = arguments.get("query", "Artikkel") + " – Wikipedia"
+                        provider = "wikipedia"
+                    else:
+                        title = arguments.get("query", arguments.get("identifier", "Kilde"))
                     
                     sources.append(SourceReference(
                         title=title,
                         url=url,
                         provider=provider,
-                        snippet=result_text[:200] + "..." if len(result_text) > 200 else result_text
+                        snippet=None  # Don't include raw API output as snippet
                     ))
+        
+        # If riksantikvaren tools were used but no URLs found, add a general reference
+        if has_riksantikvaren and not any(s.provider == "riksantikvaren" for s in sources):
+            sources.append(SourceReference(
+                title="Askeladden – Riksantikvarens kulturminnedatabase",
+                url="https://kulturminnesok.no/",
+                provider="riksantikvaren",
+                snippet="Data hentet fra Riksantikvarens Askeladden-database"
+            ))
         
         return sources[:10]  # Limit total sources
     
@@ -315,27 +356,31 @@ class AgentRunner:
         
         cleaned = response_text
         
-        # Remove "## Kilder" / "## Sources" section and everything after it
+        # Remove "## Kilder" / "## Sources" / "## Kilder" section and everything after it
+        # This catches everything from the sources heading to the end
         kilder_patterns = [
-            r'\n## Kilder\s*\n[\s\S]*$',
-            r'\n## Sources\s*\n[\s\S]*$',
+            r'\n+##\s*Kilder\s*\n[\s\S]*$',
+            r'\n+##\s*Kilder\s*\n[\s\S]*$',  # Common typo
+            r'\n+##\s*Sources\s*\n[\s\S]*$',
+            r'\n+##\s*Referanser\s*\n[\s\S]*$',
         ]
         for pattern in kilder_patterns:
             cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
         
-        # Remove "**Relaterte spørsmål:**" section (if it appears without the Kilder section)
+        # Remove "**Relaterte spørsmål:**" section (standalone or after ---)
         related_patterns = [
-            r'\n---\s*\n\*\*Relaterte spørsmål:\*\*\s*\n(?:[-*]\s*.+\n?)+',
-            r'\n---\s*\n\*\*Related questions:\*\*\s*\n(?:[-*]\s*.+\n?)+',
-            r'\n\*\*Relaterte spørsmål:\*\*\s*\n(?:[-*]\s*.+\n?)+',
-            r'\n\*\*Related questions:\*\*\s*\n(?:[-*]\s*.+\n?)+',
-            r'\n## Relaterte spørsmål\s*\n(?:[-*]\s*.+\n?)+',
+            r'\n+---\s*\n+\*\*Relaterte spørsmål[:\*]*\*\*\s*\n[\s\S]*$',
+            r'\n+---\s*\n+\*\*Related questions[:\*]*\*\*\s*\n[\s\S]*$',
+            r'\n+\*\*Relaterte spørsmål[:\*]*\*\*\s*\n(?:[-*]\s*.+\n?)+',
+            r'\n+\*\*Related questions[:\*]*\*\*\s*\n(?:[-*]\s*.+\n?)+',
+            r'\n+##\s*Relaterte spørsmål\s*\n[\s\S]*$',
+            r'\n+##\s*Related questions\s*\n[\s\S]*$',
         ]
         for pattern in related_patterns:
             cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
         
-        # Remove trailing whitespace and horizontal rules
-        cleaned = re.sub(r'\n---\s*$', '', cleaned)
+        # Remove trailing horizontal rules and whitespace
+        cleaned = re.sub(r'\n+---\s*$', '', cleaned)
         cleaned = cleaned.rstrip()
         
         return cleaned
