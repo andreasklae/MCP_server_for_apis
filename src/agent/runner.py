@@ -138,8 +138,9 @@ SOURCE_TOOL_MAP = {
     "riksantikvaren": ["riksantikvaren-", "arcgis-"],
 }
 
-# System prompt for the agent - instructs to use Markdown and cite sources
-SYSTEM_PROMPT = """You are a knowledgeable guide to Norwegian cultural heritage. You help users discover and learn about historical sites, monuments, buildings, and cultural landmarks in Norway.
+# System prompt for the agent - instructs to use Markdown (sources/related questions handled separately)
+SYSTEM_PROMPT = """
+You are a knowledgeable guide to Norwegian cultural heritage. You help users discover and learn about historical sites, monuments, buildings, and cultural landmarks in Norway.
 
 You have access to several data sources:
 - **Wikipedia**: General encyclopedic knowledge in Norwegian and English
@@ -151,29 +152,16 @@ When answering questions:
 2. Prefer Norwegian sources (SNL, Riksantikvaren) for Norwegian cultural heritage
 3. Use Wikipedia for broader context or international comparisons
 4. **Always format your response in Markdown** with proper headings, lists, and emphasis
-5. **Include source URLs** at the end of your response in a "## Kilder" (Sources) section
-6. If you can't find information, say so honestly
-7. For location-based queries, use geosearch tools when coordinates are available
-8. At the very end, suggest 2-3 related follow-up questions the user might want to ask
+5. If you can't find information, say so honestly
+6. For location-based queries, use geosearch tools when coordinates are available
 
-Respond in the same language as the user's question (Norwegian or English).
+You value:
+1. Being creative and entertaining for the user
+2. Basing your answers on the sources you have access to
+3. Being honest about the validity of your sources.
 
-Example response format:
-```
-# [Main Topic]
-
-[Content in Markdown with proper formatting...]
-
-## Kilder
-- [Source Title](URL)
-- [Source Title](URL)
-
----
-**Relaterte spørsmål:**
-- Question 1?
-- Question 2?
-- Question 3?
-```"""
+Respond in the same language as the user's question.
+"""
 
 
 # =============================================================================
@@ -317,6 +305,41 @@ class AgentRunner:
         
         return queries[:5]
     
+    def _clean_response_text(self, response_text: str) -> str:
+        """Remove sources and related questions sections from response text.
+        
+        These are extracted into structured fields, so we don't want them duplicated
+        in the main response text.
+        """
+        import re
+        
+        cleaned = response_text
+        
+        # Remove "## Kilder" / "## Sources" section and everything after it
+        kilder_patterns = [
+            r'\n## Kilder\s*\n[\s\S]*$',
+            r'\n## Sources\s*\n[\s\S]*$',
+        ]
+        for pattern in kilder_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        # Remove "**Relaterte spørsmål:**" section (if it appears without the Kilder section)
+        related_patterns = [
+            r'\n---\s*\n\*\*Relaterte spørsmål:\*\*\s*\n(?:[-*]\s*.+\n?)+',
+            r'\n---\s*\n\*\*Related questions:\*\*\s*\n(?:[-*]\s*.+\n?)+',
+            r'\n\*\*Relaterte spørsmål:\*\*\s*\n(?:[-*]\s*.+\n?)+',
+            r'\n\*\*Related questions:\*\*\s*\n(?:[-*]\s*.+\n?)+',
+            r'\n## Relaterte spørsmål\s*\n(?:[-*]\s*.+\n?)+',
+        ]
+        for pattern in related_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        # Remove trailing whitespace and horizontal rules
+        cleaned = re.sub(r'\n---\s*$', '', cleaned)
+        cleaned = cleaned.rstrip()
+        
+        return cleaned
+    
     async def chat_stream(self, request: ChatRequest) -> AsyncGenerator[SSEEvent, None]:
         """Process a chat request with streaming events."""
         start_time = time.time()
@@ -443,12 +466,16 @@ class AgentRunner:
         # Extract sources from tool results
         extracted_sources = self._extract_sources_from_tool_results(tool_results)
         
-        # Extract related queries from response
+        # Extract related queries from response (before cleaning)
         related_queries = self._extract_related_queries(full_response_text)
+        
+        # Clean the response text to remove sources/related queries sections
+        # (these are now in structured fields, so we don't want duplicates)
+        cleaned_response_text = self._clean_response_text(full_response_text)
         
         final_response = ChatResponse(
             response=ResponseContent(
-                text=full_response_text,
+                text=cleaned_response_text,
                 summary=None,  # Could add a summarization step here
             ),
             sources=extracted_sources,
