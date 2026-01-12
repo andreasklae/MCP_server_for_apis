@@ -70,11 +70,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             logger.debug("Auth disabled, skipping")
             return await call_next(request)
         
-        # Allow public paths
-        if any(path.startswith(p) for p in self.PUBLIC_PATHS):
-            return await call_next(request)
-        
-        # Check protected paths
+        # Check protected paths FIRST (before public paths check)
         if any(path.startswith(p) for p in self.PROTECTED_PATHS):
             auth_header = request.headers.get("Authorization")
             token = extract_bearer_token(auth_header)
