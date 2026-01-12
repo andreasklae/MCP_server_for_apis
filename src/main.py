@@ -250,13 +250,24 @@ def check_chat_rate_limit(client_ip: str) -> bool:
     return True
 
 
+def get_client_ip(request: Request) -> str:
+    """Extract client IP from request, handling proxies."""
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    return client_ip
+
+
 @app.post("/api/chat")
 async def chat_endpoint(request: Request) -> JSONResponse:
     """
-    Chat endpoint for the AI agent.
+    Chat endpoint for the AI agent (non-streaming).
     
     Requires MCP auth token in Authorization header.
     Rate limited per IP to control OpenAI costs.
+    
+    Returns structured JSON with response, sources, locations, and related queries.
     """
     settings = get_settings()
     
@@ -268,10 +279,7 @@ async def chat_endpoint(request: Request) -> JSONResponse:
         )
     
     # Get client IP for rate limiting
-    client_ip = request.client.host if request.client else "unknown"
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        client_ip = forwarded_for.split(",")[0].strip()
+    client_ip = get_client_ip(request)
     
     # Check rate limit
     if not check_chat_rate_limit(client_ip):
@@ -313,8 +321,8 @@ async def chat_endpoint(request: Request) -> JSONResponse:
         
         log.info(
             "Chat response",
-            tools_used=response.tools_used,
-            sources_consulted=response.sources_consulted,
+            tools_used=response.metadata.tools_used,
+            sources_consulted=response.metadata.providers_consulted,
         )
         
         return JSONResponse(content=response.model_dump())
@@ -327,6 +335,87 @@ async def chat_endpoint(request: Request) -> JSONResponse:
         )
 
 
+@app.post("/api/chat/stream")
+async def chat_stream_endpoint(request: Request):
+    """
+    Streaming chat endpoint using Server-Sent Events.
+    
+    Requires MCP auth token in Authorization header.
+    Rate limited per IP to control OpenAI costs.
+    
+    Streams events:
+    - status: Processing status updates
+    - tool_start: Tool execution started
+    - tool_end: Tool execution completed
+    - token: Response text tokens
+    - done: Final structured response
+    - error: Error occurred
+    """
+    from sse_starlette.sse import EventSourceResponse
+    from src.agent.runner import AgentRunner, ChatRequest, ErrorEvent
+    
+    settings = get_settings()
+    log = get_logger("chat_stream")
+    
+    # Check if chat is enabled
+    if not settings.chat_enabled:
+        async def error_stream():
+            yield {
+                "event": "error",
+                "data": json.dumps({"type": "error", "message": "Chat service not configured"})
+            }
+        return EventSourceResponse(error_stream())
+    
+    # Get client IP for rate limiting
+    client_ip = get_client_ip(request)
+    
+    # Check rate limit
+    if not check_chat_rate_limit(client_ip):
+        async def rate_limit_stream():
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "type": "error",
+                    "message": f"Rate limit exceeded. Maximum {settings.chat_rate_limit_per_hour} messages per hour"
+                })
+            }
+        return EventSourceResponse(rate_limit_stream())
+    
+    # Parse request body
+    try:
+        body = await request.json()
+        chat_request = ChatRequest(**body)
+    except Exception as e:
+        async def parse_error_stream():
+            yield {
+                "event": "error",
+                "data": json.dumps({"type": "error", "message": f"Invalid request: {e}"})
+            }
+        return EventSourceResponse(parse_error_stream())
+    
+    log.info("Chat stream request", message_length=len(chat_request.message), sources=chat_request.sources)
+    
+    async def event_generator():
+        try:
+            runner = AgentRunner(settings.openai_api_key)
+            
+            async for event in runner.chat_stream(chat_request):
+                event_data = event.model_dump()
+                yield {
+                    "event": event.type,
+                    "data": json.dumps(event_data, ensure_ascii=False)
+                }
+                
+        except Exception as e:
+            log.error("Chat stream error", exc_info=True)
+            yield {
+                "event": "error",
+                "data": json.dumps({"type": "error", "message": str(e)})
+            }
+    
+    return EventSourceResponse(event_generator())
+
+
 @app.get("/api/chat/status")
 async def chat_status() -> dict:
     """Check if chat is available and get configuration."""
@@ -335,6 +424,7 @@ async def chat_status() -> dict:
         "enabled": settings.chat_enabled,
         "rate_limit_per_hour": settings.chat_rate_limit_per_hour,
         "sources_available": ["wikipedia", "snl", "riksantikvaren"],
+        "streaming_supported": True,
     }
 
 

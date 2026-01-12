@@ -49,7 +49,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """Middleware to enforce authentication on protected endpoints."""
     
     # Paths that require authentication (when enabled)
-    PROTECTED_PATHS = ["/sse", "/message", "/api/chat"]
+    PROTECTED_PATHS = ["/sse", "/message", "/api/chat", "/api/chat/stream"]
     
     # Paths that are always public (no auth required)
     PUBLIC_PATHS = [

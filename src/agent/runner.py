@@ -1,8 +1,9 @@
-"""Agent runner that uses OpenAI with MCP tools."""
+"""Agent runner that uses OpenAI with MCP tools - with SSE streaming support."""
 
 import json
 import logging
-from typing import Any
+import time
+from typing import Any, AsyncGenerator
 
 from openai import OpenAI, AzureOpenAI
 from pydantic import BaseModel, Field
@@ -11,6 +12,11 @@ from src.mcp.registry import get_registry
 from src.config.loader import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Request/Response Models
+# =============================================================================
 
 
 class ChatRequest(BaseModel):
@@ -27,12 +33,102 @@ class ChatRequest(BaseModel):
     )
 
 
-class ChatResponse(BaseModel):
-    """Response model for chat endpoint."""
+class SourceReference(BaseModel):
+    """A reference to a source used in the response."""
     
-    response: str = Field(..., description="Agent response")
-    tools_used: list[str] = Field(default_factory=list, description="Tools that were called")
-    sources_consulted: list[str] = Field(default_factory=list, description="Data sources used")
+    title: str = Field(..., description="Title of the source")
+    url: str = Field(..., description="URL to the source")
+    provider: str = Field(..., description="Provider name: wikipedia, snl, riksantikvaren")
+    snippet: str | None = Field(None, description="Short preview of the content")
+
+
+class Location(BaseModel):
+    """A geographic location mentioned in the response."""
+    
+    name: str = Field(..., description="Name of the location")
+    lat: float = Field(..., description="Latitude")
+    lng: float = Field(..., description="Longitude")
+    type: str = Field(default="heritage_site", description="Type of location")
+
+
+class ResponseContent(BaseModel):
+    """The main response content."""
+    
+    text: str = Field(..., description="Main response text in Markdown format")
+    summary: str | None = Field(None, description="One-sentence summary")
+
+
+class ChatResponseMetadata(BaseModel):
+    """Metadata about the chat response."""
+    
+    tools_used: list[str] = Field(default_factory=list)
+    providers_consulted: list[str] = Field(default_factory=list)
+    processing_time_ms: int = Field(default=0)
+    model: str = Field(default="gpt-4o")
+
+
+class ChatResponse(BaseModel):
+    """Structured response model for chat endpoint."""
+    
+    response: ResponseContent
+    sources: list[SourceReference] = Field(default_factory=list)
+    locations: list[Location] = Field(default_factory=list)
+    related_queries: list[str] = Field(default_factory=list)
+    metadata: ChatResponseMetadata = Field(default_factory=ChatResponseMetadata)
+
+
+# =============================================================================
+# SSE Event Models
+# =============================================================================
+
+
+class SSEEvent(BaseModel):
+    """Base class for SSE events."""
+    type: str
+
+
+class StatusEvent(SSEEvent):
+    """Status update event."""
+    type: str = "status"
+    message: str
+
+
+class ToolStartEvent(SSEEvent):
+    """Tool execution started."""
+    type: str = "tool_start"
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolEndEvent(SSEEvent):
+    """Tool execution completed."""
+    type: str = "tool_end"
+    tool: str
+    success: bool
+    preview: str | None = None
+
+
+class TokenEvent(SSEEvent):
+    """Token from streaming response."""
+    type: str = "token"
+    content: str
+
+
+class DoneEvent(SSEEvent):
+    """Final response with full structured data."""
+    type: str = "done"
+    response: ChatResponse
+
+
+class ErrorEvent(SSEEvent):
+    """Error event."""
+    type: str = "error"
+    message: str
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
 
 
 # Map source names to tool prefixes
@@ -42,7 +138,7 @@ SOURCE_TOOL_MAP = {
     "riksantikvaren": ["riksantikvaren-", "arcgis-"],
 }
 
-# System prompt for the agent
+# System prompt for the agent - instructs to use Markdown and cite sources
 SYSTEM_PROMPT = """You are a knowledgeable guide to Norwegian cultural heritage. You help users discover and learn about historical sites, monuments, buildings, and cultural landmarks in Norway.
 
 You have access to several data sources:
@@ -54,22 +150,45 @@ When answering questions:
 1. Use the appropriate tools to find accurate information
 2. Prefer Norwegian sources (SNL, Riksantikvaren) for Norwegian cultural heritage
 3. Use Wikipedia for broader context or international comparisons
-4. Always cite your sources
-5. If you can't find information, say so honestly
-6. For location-based queries, use geosearch tools when coordinates are available
+4. **Always format your response in Markdown** with proper headings, lists, and emphasis
+5. **Include source URLs** at the end of your response in a "## Kilder" (Sources) section
+6. If you can't find information, say so honestly
+7. For location-based queries, use geosearch tools when coordinates are available
+8. At the very end, suggest 2-3 related follow-up questions the user might want to ask
 
-Respond in the same language as the user's question (Norwegian or English)."""
+Respond in the same language as the user's question (Norwegian or English).
+
+Example response format:
+```
+# [Main Topic]
+
+[Content in Markdown with proper formatting...]
+
+## Kilder
+- [Source Title](URL)
+- [Source Title](URL)
+
+---
+**Relaterte spørsmål:**
+- Question 1?
+- Question 2?
+- Question 3?
+```"""
+
+
+# =============================================================================
+# Agent Runner
+# =============================================================================
 
 
 class AgentRunner:
-    """Runs the chat agent with tool calling."""
+    """Runs the chat agent with tool calling and streaming support."""
     
     def __init__(self, openai_api_key: str):
         """Initialize with OpenAI API key (works with both OpenAI and Azure OpenAI)."""
         settings = get_settings()
         
         if settings.use_azure_openai:
-            # Use Azure OpenAI
             logger.info(f"Using Azure OpenAI: {settings.azure_openai_endpoint}")
             self.client = AzureOpenAI(
                 api_key=openai_api_key,
@@ -78,7 +197,6 @@ class AgentRunner:
             )
             self.model = settings.azure_openai_deployment
         else:
-            # Use OpenAI direct
             logger.info("Using OpenAI direct API")
             self.client = OpenAI(api_key=openai_api_key)
             self.model = "gpt-4o"
@@ -94,10 +212,8 @@ class AgentRunner:
             if source in SOURCE_TOOL_MAP:
                 enabled_prefixes.extend(SOURCE_TOOL_MAP[source])
         
-        # Get all tools from registry and filter by prefix
         for mcp_tool in self.registry.list_tools():
             if any(mcp_tool.name.startswith(prefix) for prefix in enabled_prefixes):
-                # Convert MCP tool schema to OpenAI function format
                 tools.append({
                     "type": "function",
                     "function": {
@@ -118,10 +234,7 @@ class AgentRunner:
             
             result = await tool.handler(arguments)
             
-            # Handle different result types
-            # Tool handlers return list[TextContent] which are Pydantic models
             if isinstance(result, list):
-                # Extract text from TextContent objects
                 texts = []
                 for item in result:
                     if hasattr(item, 'text'):
@@ -144,26 +257,87 @@ class AgentRunner:
             logger.error(f"Tool execution error: {tool_name}", exc_info=True)
             return json.dumps({"error": str(e)})
     
-    async def chat(self, request: ChatRequest) -> ChatResponse:
-        """Process a chat request and return response."""
-        tools_used = []
-        sources_consulted = set()
+    def _extract_sources_from_tool_results(
+        self, tool_results: list[tuple[str, str, dict[str, Any]]]
+    ) -> list[SourceReference]:
+        """Extract source references from tool results."""
+        sources = []
+        seen_urls = set()
+        
+        for tool_name, result_text, arguments in tool_results:
+            # Try to extract URLs and titles from the result
+            provider = "riksantikvaren"
+            if tool_name.startswith("wikipedia-"):
+                provider = "wikipedia"
+            elif tool_name.startswith("snl-"):
+                provider = "snl"
+            
+            # Look for URLs in the result
+            import re
+            url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+            urls = re.findall(url_pattern, result_text)
+            
+            for url in urls[:3]:  # Limit to 3 URLs per tool
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    # Try to extract a title
+                    title = arguments.get("query", arguments.get("identifier", "Source"))
+                    if provider == "snl":
+                        title = f"{title} – Store norske leksikon"
+                    elif provider == "wikipedia":
+                        title = f"{title} – Wikipedia"
+                    
+                    sources.append(SourceReference(
+                        title=title,
+                        url=url,
+                        provider=provider,
+                        snippet=result_text[:200] + "..." if len(result_text) > 200 else result_text
+                    ))
+        
+        return sources[:10]  # Limit total sources
+    
+    def _extract_related_queries(self, response_text: str) -> list[str]:
+        """Extract related queries from the response."""
+        queries = []
+        
+        # Look for the related questions section
+        import re
+        patterns = [
+            r'\*\*Relaterte spørsmål:\*\*\s*\n((?:[-*]\s*.+\n?)+)',
+            r'\*\*Related questions:\*\*\s*\n((?:[-*]\s*.+\n?)+)',
+            r'## Relaterte spørsmål\s*\n((?:[-*]\s*.+\n?)+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, response_text, re.IGNORECASE)
+            if match:
+                items = re.findall(r'[-*]\s*(.+?)(?:\?|\n|$)', match.group(1))
+                queries = [q.strip() + ("?" if not q.strip().endswith("?") else "") for q in items if q.strip()]
+                break
+        
+        return queries[:5]
+    
+    async def chat_stream(self, request: ChatRequest) -> AsyncGenerator[SSEEvent, None]:
+        """Process a chat request with streaming events."""
+        start_time = time.time()
+        tools_used: list[str] = []
+        sources_consulted: set[str] = set()
+        tool_results: list[tuple[str, str, dict[str, Any]]] = []
+        full_response_text = ""
+        
+        yield StatusEvent(message="Analyserer spørsmål...")
         
         # Build messages
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        
-        # Add conversation history
         for msg in request.conversation_history:
             messages.append(msg)
-        
-        # Add current user message
         messages.append({"role": "user", "content": request.message})
         
         # Get enabled tools
         tools = self._get_enabled_tools(request.sources)
         
-        # Call OpenAI with tools
         try:
+            # First call to check for tool use (non-streaming)
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -172,63 +346,58 @@ class AgentRunner:
                 max_tokens=2048,
                 temperature=0.7,
             )
-        except Exception as e:
-            logger.error("OpenAI API error", exc_info=True)
-            return ChatResponse(
-                response=f"Error communicating with AI service: {str(e)}",
-                tools_used=[],
-                sources_consulted=[],
-            )
-        
-        # Process response and handle tool calls
-        message = response.choices[0].message
-        
-        # If there are tool calls, execute them and get final response
-        while message.tool_calls:
-            # Add assistant message with tool calls
-            messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        }
-                    }
-                    for tc in message.tool_calls
-                ]
-            })
+            message = response.choices[0].message
             
-            # Execute each tool call
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-                tools_used.append(tool_name)
-                
-                # Track which sources were used
-                for source, prefixes in SOURCE_TOOL_MAP.items():
-                    if any(tool_name.startswith(p) for p in prefixes):
-                        sources_consulted.add(source)
-                
-                try:
-                    arguments = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
-                
-                logger.info(f"Executing tool: {tool_name}", extra={"arguments": arguments})
-                result = await self._execute_tool(tool_name, arguments)
-                
-                # Add tool result
+            # Handle tool calls
+            while message.tool_calls:
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
+                    "role": "assistant",
+                    "content": message.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }
+                        }
+                        for tc in message.tool_calls
+                    ]
                 })
-            
-            # Get next response
-            try:
+                
+                for tool_call in message.tool_calls:
+                    tool_name = tool_call.function.name
+                    tools_used.append(tool_name)
+                    
+                    # Track sources
+                    for source, prefixes in SOURCE_TOOL_MAP.items():
+                        if any(tool_name.startswith(p) for p in prefixes):
+                            sources_consulted.add(source)
+                    
+                    try:
+                        arguments = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+                    
+                    # Emit tool start event
+                    yield ToolStartEvent(tool=tool_name, arguments=arguments)
+                    
+                    # Execute tool
+                    result = await self._execute_tool(tool_name, arguments)
+                    tool_results.append((tool_name, result, arguments))
+                    
+                    # Emit tool end event
+                    preview = result[:150] + "..." if len(result) > 150 else result
+                    yield ToolEndEvent(tool=tool_name, success=True, preview=preview)
+                    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    })
+                
+                # Get next response (non-streaming for tool loop)
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -238,16 +407,80 @@ class AgentRunner:
                     temperature=0.7,
                 )
                 message = response.choices[0].message
-            except Exception as e:
-                logger.error("OpenAI API error during tool loop", exc_info=True)
+            
+            # Now stream the final response
+            yield StatusEvent(message="Genererer svar...")
+            
+            # Make a streaming call for the final response
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=2048,
+                temperature=0.7,
+                stream=True,
+            )
+            
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    full_response_text += token
+                    yield TokenEvent(content=token)
+            
+            # If no streaming response, use the previous response
+            if not full_response_text and message.content:
+                full_response_text = message.content
+                # Emit all tokens at once
+                yield TokenEvent(content=full_response_text)
+            
+        except Exception as e:
+            logger.error("Error in chat_stream", exc_info=True)
+            yield ErrorEvent(message=str(e))
+            return
+        
+        # Build final structured response
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Extract sources from tool results
+        extracted_sources = self._extract_sources_from_tool_results(tool_results)
+        
+        # Extract related queries from response
+        related_queries = self._extract_related_queries(full_response_text)
+        
+        final_response = ChatResponse(
+            response=ResponseContent(
+                text=full_response_text,
+                summary=None,  # Could add a summarization step here
+            ),
+            sources=extracted_sources,
+            locations=[],  # Could extract from riksantikvaren results
+            related_queries=related_queries,
+            metadata=ChatResponseMetadata(
+                tools_used=tools_used,
+                providers_consulted=list(sources_consulted),
+                processing_time_ms=processing_time_ms,
+                model=self.model,
+            ),
+        )
+        
+        yield DoneEvent(response=final_response)
+    
+    async def chat(self, request: ChatRequest) -> ChatResponse:
+        """Process a chat request and return structured response (non-streaming)."""
+        final_response = None
+        
+        async for event in self.chat_stream(request):
+            if isinstance(event, DoneEvent):
+                final_response = event.response
+            elif isinstance(event, ErrorEvent):
                 return ChatResponse(
-                    response=f"Error during tool execution: {str(e)}",
-                    tools_used=tools_used,
-                    sources_consulted=list(sources_consulted),
+                    response=ResponseContent(text=f"Error: {event.message}"),
+                    metadata=ChatResponseMetadata(model=self.model),
                 )
         
-        return ChatResponse(
-            response=message.content or "I couldn't generate a response.",
-            tools_used=tools_used,
-            sources_consulted=list(sources_consulted),
-        )
+        if final_response is None:
+            return ChatResponse(
+                response=ResponseContent(text="No response generated."),
+                metadata=ChatResponseMetadata(model=self.model),
+            )
+        
+        return final_response
