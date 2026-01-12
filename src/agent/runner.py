@@ -102,9 +102,23 @@ class AgentRunner:
             result = await tool.handler(arguments)
             
             # Handle different result types
-            if isinstance(result, dict):
-                return json.dumps(result, ensure_ascii=False, indent=2)
-            elif isinstance(result, list):
+            # Tool handlers return list[TextContent] which are Pydantic models
+            if isinstance(result, list):
+                # Extract text from TextContent objects
+                texts = []
+                for item in result:
+                    if hasattr(item, 'text'):
+                        texts.append(item.text)
+                    elif hasattr(item, 'model_dump'):
+                        texts.append(json.dumps(item.model_dump(), ensure_ascii=False))
+                    else:
+                        texts.append(str(item))
+                return "\n".join(texts)
+            elif hasattr(result, 'text'):
+                return result.text
+            elif hasattr(result, 'model_dump'):
+                return json.dumps(result.model_dump(), ensure_ascii=False, indent=2)
+            elif isinstance(result, dict):
                 return json.dumps(result, ensure_ascii=False, indent=2)
             else:
                 return str(result)
