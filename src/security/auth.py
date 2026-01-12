@@ -57,7 +57,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/docs",
         "/openapi.json",
         "/redoc",
-        "/api/chat/status",
         "/debug",
     ]
     

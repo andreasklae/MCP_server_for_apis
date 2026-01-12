@@ -78,15 +78,15 @@ class AgentRunner:
                 enabled_prefixes.extend(SOURCE_TOOL_MAP[source])
         
         # Get all tools from registry and filter by prefix
-        for tool_name, tool in self.registry.tools.items():
-            if any(tool_name.startswith(prefix) for prefix in enabled_prefixes):
+        for mcp_tool in self.registry.list_tools():
+            if any(mcp_tool.name.startswith(prefix) for prefix in enabled_prefixes):
                 # Convert MCP tool schema to OpenAI function format
                 tools.append({
                     "type": "function",
                     "function": {
-                        "name": tool_name,
-                        "description": tool.description,
-                        "parameters": tool.input_schema,
+                        "name": mcp_tool.name,
+                        "description": mcp_tool.description,
+                        "parameters": mcp_tool.inputSchema,
                     }
                 })
         
@@ -95,7 +95,7 @@ class AgentRunner:
     async def _execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Execute a tool and return the result as a string."""
         try:
-            tool = self.registry.get_tool(tool_name)
+            tool = self.registry.get(tool_name)
             if not tool:
                 return json.dumps({"error": f"Tool '{tool_name}' not found"})
             
