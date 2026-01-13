@@ -128,17 +128,20 @@ enabled_providers:
 ### Riksantikvaren OGC Tools
 | Tool | Description |
 |------|-------------|
-| `riksantikvaren-collections` | List available data collections |
-| `riksantikvaren-features` | Query features with optional bbox |
+| `riksantikvaren-datasets` | List available datasets |
+| `riksantikvaren-collections` | List collections within a dataset |
+| `riksantikvaren-features` | Query features (bbox works for brukerminner only) |
 | `riksantikvaren-feature` | Get single feature by ID |
-| `riksantikvaren-nearby` | Find heritage sites near coordinates |
+| `riksantikvaren-nearby` | Find **user memories** (brukerminner) near coordinates |
 
 ### Riksantikvaren ArcGIS Tools
 | Tool | Description |
 |------|-------------|
 | `arcgis-services` | List available map services |
 | `arcgis-query` | Query features with SQL or bbox |
-| `arcgis-nearby` | Find sites near coordinates |
+| `arcgis-nearby` | Find **official heritage sites** near coordinates (recommended) |
+
+> **Note**: For location-based queries, use `arcgis-nearby` for official kulturminner and `riksantikvaren-nearby` for user-contributed brukerminner. The OGC API's bbox filter doesn't work reliably for kulturminner.
 
 ## Adding a New API Provider
 
@@ -365,6 +368,24 @@ az containerapp update \
 ```
 
 Push to `main` branch to trigger automatic deployment via GitHub Actions.
+
+## Performance
+
+The server includes several performance optimizations:
+
+### Connection Pooling
+HTTP clients use a shared connection pool with keepalive, reducing latency for sequential API calls by ~15x.
+
+### Response Caching
+Metadata queries (datasets, collections, services) are cached with TTL:
+- Dataset/collection lists: 1 hour
+- Individual features: 5 minutes
+
+### Parallel Tool Execution
+When the AI agent requests multiple tools simultaneously, they execute in parallel using `asyncio.gather()`. This provides ~6-9x speedup for multi-tool queries.
+
+### Field Selection
+ArcGIS queries only fetch essential fields (15 vs 50+), reducing response size and parsing time.
 
 ## Limitations
 
