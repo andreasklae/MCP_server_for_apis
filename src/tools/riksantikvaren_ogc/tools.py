@@ -1,6 +1,7 @@
 """Riksantikvaren OGC API provider tools."""
 
 import logging
+import math
 from typing import Any
 
 from src.mcp.models import TextContent
@@ -10,8 +11,30 @@ from src.tools.riksantikvaren_ogc.client import get_client, AVAILABLE_DATASETS
 logger = logging.getLogger(__name__)
 
 
-def format_feature(feature: dict[str, Any], index: int = 0) -> str:
-    """Format a GeoJSON feature for display."""
+def _calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance between two points in meters using Haversine formula."""
+    R = 6371000  # Earth's radius in meters
+    
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    
+    a = math.sin(delta_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    
+    return R * c
+
+
+def format_feature(feature: dict[str, Any], index: int = 0, center_lat: float | None = None, center_lon: float | None = None) -> str:
+    """Format a GeoJSON feature for display.
+    
+    Args:
+        feature: GeoJSON feature
+        index: Feature index for fallback naming
+        center_lat: Optional center latitude for distance calculation
+        center_lon: Optional center longitude for distance calculation
+    """
     props = feature.get("properties", {}) or {}
     geometry = feature.get("geometry", {}) or {}
     
@@ -31,6 +54,8 @@ def format_feature(feature: dict[str, Any], index: int = 0) -> str:
         lines.append(f"  Kategori: {props['kategori']}")
     if props.get("kulturminneKategori"):
         lines.append(f"  Kategori: {props['kulturminneKategori']}")
+    if props.get("enkeltminnekategori"):
+        lines.append(f"  Kategori: {props['enkeltminnekategori']}")
     if props.get("kommune"):
         lines.append(f"  Kommune: {props['kommune']}")
     if props.get("fylke"):
@@ -47,38 +72,63 @@ def format_feature(feature: dict[str, Any], index: int = 0) -> str:
         desc = props["beskrivelse"][:200] + "..." if len(props.get("beskrivelse", "")) > 200 else props.get("beskrivelse", "")
         lines.append(f"  Beskrivelse: {desc}")
     
-    # Add ID and links - always generate a kulturminnesok URL if we have an ID
-    feature_id = feature.get("id") or props.get("lokalId") or props.get("lokalitetId")
+    # Get feature ID - try multiple property names (API uses different casings)
+    feature_id = feature.get("id")
     if feature_id:
         lines.append(f"  ID: {feature_id}")
     
-    # Use provided link or construct one from the ID
-    # Kulturminnesøk URL format: https://www.kulturminnesok.no/kart/?id={uuid}
-    if props.get("linkKulturminnesok"):
-        lines.append(f"  Lenke: {props['linkKulturminnesok']}")
-    elif props.get("lenke"):
-        lines.append(f"  Lenke: {props['lenke']}")
-    elif feature_id:
-        # Construct kulturminnesok URL - include coordinates for map positioning if available
-        base_url = f"https://www.kulturminnesok.no/kart/?id={feature_id}"
-        
-        # Add bounds/zoom if we have coordinates for better map centering
-        if geometry.get("type") == "Point" and geometry.get("coordinates"):
-            coords = geometry["coordinates"]
-            if coords and len(coords) >= 2:
-                lon, lat = coords[0], coords[1]
-                # Create small bounding box around the point
-                delta = 0.001  # ~100m
-                bounds = f"{lat+delta},{lon+delta},{lat-delta},{lon-delta}"
-                base_url = f"https://www.kulturminnesok.no/kart/?bounds={bounds}&zoom=17&id={feature_id}"
-        
-        lines.append(f"  Lenke: {base_url}")
+    # Get lokalitet ID - API uses 'lokalitetid' (lowercase)
+    lokalitet_id = props.get("lokalitetid") or props.get("lokalitetId") or props.get("lokalId")
     
-    # Add coordinates if available
+    # Get link to kulturminnesøk - API uses Norwegian 'ø' character!
+    # kulturminner: "linkKulturminnesøk" (with ø)
+    # brukerminner: "linkkulturminnesok" (all lowercase, no ø)
+    link = (
+        props.get("linkKulturminnesøk") or  # kulturminner (with Norwegian ø)
+        props.get("linkKulturminnesok") or  # fallback without ø
+        props.get("linkkulturminnesok") or  # brukerminner (all lowercase)
+        props.get("lenke")
+    )
+    
+    if link:
+        # Normalize HTTP to HTTPS
+        if link.startswith("http://"):
+            link = "https://" + link[7:]
+        lines.append(f"  Lenke: {link}")
+    elif lokalitet_id:
+        # Fallback: construct URL using /ra/lokalitet/ format (redirects correctly)
+        lines.append(f"  Lenke: https://kulturminnesok.no/ra/lokalitet/{lokalitet_id}")
+    elif feature_id:
+        # Last resort: use feature_id directly (works for brukerminner UUIDs)
+        lines.append(f"  Lenke: https://www.kulturminnesok.no/kart/?id={feature_id}")
+    
+    # Add coordinates and distance if available
+    feature_lat, feature_lon = None, None
+    
     if geometry.get("type") == "Point" and geometry.get("coordinates"):
         coords = geometry["coordinates"]
         if coords and len(coords) >= 2:
-            lines.append(f"  Koordinater: {coords[1]:.5f}, {coords[0]:.5f}")
+            feature_lon, feature_lat = coords[0], coords[1]
+            lines.append(f"  Koordinater: {feature_lat:.5f}, {feature_lon:.5f}")
+    # Also check for gpsposisjon property (brukerminner uses this)
+    elif props.get("gpsposisjon"):
+        gps = props["gpsposisjon"]
+        lines.append(f"  Koordinater: {gps}")
+        # Parse gpsposisjon format: "lat, lon"
+        try:
+            parts = [float(x.strip()) for x in gps.split(",")]
+            if len(parts) == 2:
+                feature_lat, feature_lon = parts[0], parts[1]
+        except (ValueError, AttributeError):
+            pass
+    
+    # Calculate and add distance from center point if provided
+    if center_lat is not None and center_lon is not None and feature_lat is not None and feature_lon is not None:
+        distance = _calculate_distance(center_lat, center_lon, feature_lat, feature_lon)
+        if distance < 1000:
+            lines.append(f"  Avstand: {distance:.0f} m")
+        else:
+            lines.append(f"  Avstand: {distance/1000:.1f} km")
     
     return "\n".join(lines)
 
@@ -235,17 +285,25 @@ async def feature_handler(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def nearby_handler(arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle riksantikvaren-nearby tool call."""
+    """Handle riksantikvaren-nearby tool call.
+    
+    NOTE: This tool only works reliably for 'brukerminner' dataset.
+    For 'kulturminner', use the ArcGIS 'arcgis-nearby' tool instead.
+    """
     lat = arguments.get("latitude")
     lon = arguments.get("longitude")
     
     if lat is None or lon is None:
         return [TextContent(text="Error: 'latitude' and 'longitude' arguments are required")]
 
-    dataset_id = arguments.get("dataset", "kulturminner")
-    collection_id = arguments.get("collection", "kulturminner")
-    radius = arguments.get("radius", 1000)  # meters
+    dataset_id = arguments.get("dataset", "brukerminner")  # Default to brukerminner
+    collection_id = arguments.get("collection", dataset_id)  # Match collection to dataset
+    radius = arguments.get("radius", 2000)  # Default 2000m for brukerminner (sparse data)
     limit = arguments.get("limit", 20)
+    
+    # Warn if using kulturminner (bbox doesn't work for this dataset)
+    if dataset_id == "kulturminner":
+        logger.warning("riksantikvaren-nearby called for kulturminner - bbox filtering may not work. Use arcgis-nearby instead.")
     
     # Convert radius in meters to approximate degrees
     # At 60°N latitude: 1 degree ≈ 55.8 km longitude, 111 km latitude
@@ -266,13 +324,21 @@ async def nearby_handler(arguments: dict[str, Any]) -> list[TextContent]:
 
         if not features:
             return [TextContent(
-                text=f"No cultural heritage sites found within {radius}m of ({lat}, {lon})"
+                text=f"No {'user memories' if dataset_id == 'brukerminner' else 'sites'} found within {radius}m of ({lat}, {lon})"
             )]
 
-        lines = [f"Found {len(features)} cultural heritage sites near ({lat}, {lon}):\n"]
+        source_type = "user memories (brukerminner)" if dataset_id == "brukerminner" else "cultural heritage sites"
+        lines = [f"Found {len(features)} {source_type} near ({lat}, {lon}):\n"]
+        
         for i, feature in enumerate(features, 1):
-            lines.append(f"{i}. {format_feature(feature, i)}")
+            # Pass center coordinates for distance calculation
+            lines.append(f"{i}. {format_feature(feature, i, center_lat=lat, center_lon=lon)}")
             lines.append("")
+        
+        # Add source attribution
+        if dataset_id == "brukerminner":
+            lines.append("---")
+            lines.append("*Source: Brukerminner (user-contributed memories, not officially verified)*")
 
         return [TextContent(text="\n".join(lines))]
 
@@ -314,13 +380,13 @@ def register_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="riksantikvaren-features",
-        description="Query cultural heritage features from Riksantikvaren. Supports multiple datasets: 'kulturminner' (600k+ official heritage sites), 'brukerminner' (user-contributed memories and stories from the public), 'kulturmiljoer' (protected environments). Default is kulturminner.",
+        description="Query cultural heritage features from Riksantikvaren. Supports: 'kulturminner' (official heritage sites from Askeladden database), 'brukerminner' (user-contributed personal memories - NOT officially verified), 'kulturmiljoer' (protected environments). NOTE: bbox filtering only works for 'brukerminner'. For location-based kulturminner queries, use 'arcgis-nearby' instead.",
         input_schema={
             "type": "object",
             "properties": {
                 "dataset": {
                     "type": "string",
-                    "description": "Dataset: 'kulturminner' (official sites), 'brukerminner' (user memories/stories), 'kulturmiljoer' (environments)",
+                    "description": "Dataset: 'kulturminner' (official, verified sites), 'brukerminner' (user memories - unverified), 'kulturmiljoer' (environments)",
                     "default": "kulturminner",
                 },
                 "collection": {
@@ -330,7 +396,7 @@ def register_tools(registry: ToolRegistry) -> None:
                 },
                 "bbox": {
                     "type": "string",
-                    "description": "Bounding box as 'min_lon,min_lat,max_lon,max_lat' (WGS84)",
+                    "description": "Bounding box as 'min_lon,min_lat,max_lon,max_lat' (WGS84). NOTE: Only works for brukerminner!",
                 },
                 "limit": {
                     "type": "integer",
@@ -371,7 +437,7 @@ def register_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="riksantikvaren-nearby",
-        description="Find heritage sites or user memories near coordinates. Default searches 'kulturminner' (official sites: Viking finds, churches, burial mounds). Set dataset='brukerminner' for user-contributed memories and personal stories about places.",
+        description="Find user-contributed memories (brukerminner) near coordinates. Returns personal stories and memories from the public (NOT officially verified data). For official cultural heritage sites, use 'arcgis-nearby' instead. Use radius 2000-5000m as brukerminner data is sparse.",
         input_schema={
             "type": "object",
             "properties": {
@@ -385,18 +451,13 @@ def register_tools(registry: ToolRegistry) -> None:
                 },
                 "radius": {
                     "type": "integer",
-                    "description": "Search radius in meters",
-                    "default": 1000,
+                    "description": "Search radius in meters. Use 2000-5000m for brukerminner (sparse data)",
+                    "default": 2000,
                 },
                 "dataset": {
                     "type": "string",
-                    "description": "Dataset: 'kulturminner' (official sites), 'brukerminner' (user memories/stories)",
-                    "default": "kulturminner",
-                },
-                "collection": {
-                    "type": "string",
-                    "description": "Collection within dataset (usually same as dataset name)",
-                    "default": "kulturminner",
+                    "description": "Dataset: 'brukerminner' (user memories - RECOMMENDED), 'kulturminner' (broken spatial filter - use arcgis-nearby instead)",
+                    "default": "brukerminner",
                 },
                 "limit": {
                     "type": "integer",

@@ -1,5 +1,6 @@
 """Agent runner that uses OpenAI with MCP tools - with SSE streaming support."""
 
+import asyncio
 import json
 import logging
 import time
@@ -142,26 +143,51 @@ SOURCE_TOOL_MAP = {
 SYSTEM_PROMPT = """
 You are a knowledgeable tour guide. You help users discover and learn about historical sites, monuments, buildings, and cultural landmarks.
 
-You have access to several data sources:
+## Available Data Sources
+
 - **Wikipedia**: General encyclopedic knowledge in Norwegian and English
 - **Store norske leksikon (SNL)**: Authoritative Norwegian encyclopedia
 - **Riksantikvaren/Askeladden**: Official Norwegian cultural heritage database with 600,000+ registered sites
-- **Brukerminner**: User-contributed memories and personal stories about places (use dataset='brukerminner' in Riksantikvaren tools)
+- **Brukerminner**: User-contributed personal memories and stories (not officially verified)
 
-When answering questions:
-1. Use the appropriate tools to find accurate information
+## Tool Usage Strategy
+
+**IMPORTANT: Gather MORE data than you think you need!**
+
+Tools run in parallel, so calling multiple tools is fast. When in doubt:
+- Call multiple sources simultaneously (SNL + Wikipedia + Riksantikvaren)
+- You may use the same tool more than once (with different parameters) if the answer is not satisfactory.
+- Use broader search parameters initially
+- It's better to have too much information than too little
+
+After gathering data, you can decide what's relevant for your response. Not all gathered information needs to be included - only use what's actually helpful for answering the user's question.
+
+## Tool Selection Guide
+
+For location-based heritage queries:
+- **Official heritage sites** (kulturminner): Use `arcgis-nearby` - reliable spatial search for verified sites
+- **User memories/stories** (brukerminner): Use `riksantikvaren-nearby` with dataset='brukerminner' (use larger radius 2000-5000m as data is sparse)
+
+The riksantikvaren-features bbox filter only works for brukerminner, NOT for kulturminner.
+
+## Response Guidelines
+
+1. **Gather broadly, then filter**: Call multiple tools to get comprehensive data, then synthesize the best parts
 2. Prefer Norwegian sources (SNL, Riksantikvaren) for Norwegian cultural heritage
 3. Use Wikipedia for broader context or international comparisons
 4. **Always format your response in Markdown** with proper headings, lists, and emphasis
 5. If you can't find information, say so honestly
-6. For location-based queries, use geosearch tools when coordinates are available
+6. Clearly distinguish between official sources (Riksantikvaren/Askeladden) and user-contributed content (Brukerminner)
 
-You value:
+## Language
+
+**Always respond in the same language as the user's question**, regardless of what language the source material is in. Translate and synthesize information from sources as needed.
+
+## Values
+
 1. Being creative and entertaining for the user
 2. Basing your answers on the sources you have access to
-3. Being honest about the validity of your sources.
-
-Respond in the same language as the user's question.
+3. Being honest about the validity and reliability of your sources
 """
 
 
@@ -247,14 +273,22 @@ class AgentRunner:
             return json.dumps({"error": str(e)})
     
     def _extract_sources_from_tool_results(
-        self, tool_results: list[tuple[str, str, dict[str, Any]]]
+        self, 
+        tool_results: list[tuple[str, str, dict[str, Any]]],
+        response_text: str
     ) -> list[SourceReference]:
-        """Extract source references from tool results."""
+        """Extract source references from tool results that are actually used in the response.
+        
+        Only includes sources whose content appears to be referenced in the AI's response.
+        This prevents listing sources that were consulted but not used.
+        """
         import re
+        
+        # Normalize response text for matching
+        response_lower = response_text.lower()
         
         sources = []
         seen_urls = set()
-        has_riksantikvaren = False
         
         for tool_name, result_text, arguments in tool_results:
             # Determine provider
@@ -264,14 +298,16 @@ class AgentRunner:
             elif tool_name.startswith("snl-"):
                 provider = "snl"
             
-            if provider == "riksantikvaren":
-                has_riksantikvaren = True
+            # Check if this tool's content was actually used in the response
+            # We look for key terms from the tool result appearing in the response
+            if not self._is_source_used_in_response(result_text, response_text):
+                continue  # Skip sources not used in the response
             
             # Look for URLs in the result (including kulturminnesok.no links)
             url_pattern = r'https?://[^\s<>"{}|\\^`\[\])]+[^\s<>"{}|\\^`\[\].,)]'
             urls = re.findall(url_pattern, result_text)
             
-            for url in urls[:5]:  # Limit to 5 URLs per tool
+            for url in urls[:3]:  # Limit to 3 URLs per tool (reduced from 5)
                 # Clean up URL (remove trailing punctuation)
                 url = url.rstrip('.,;:)')
                 
@@ -281,8 +317,6 @@ class AgentRunner:
                     # Determine title based on URL and provider
                     if "kulturminnesok.no" in url:
                         # Try to extract the kulturminne name from the result text
-                        # Format: "**Name**\n  ..." followed later by "Lenke: {url}"
-                        # Look for bold name before this URL
                         name_match = re.search(
                             r'\*\*([^*]+)\*\*[^*]*?' + re.escape(url),
                             result_text,
@@ -291,7 +325,6 @@ class AgentRunner:
                         if name_match:
                             title = f"{name_match.group(1).strip()} – Kulturminnesøk"
                         else:
-                            # Fallback: use ID from URL
                             id_match = re.search(r'[?&]id=([a-f0-9-]+)', url)
                             if id_match:
                                 title = f"Kulturminne – Kulturminnesøk"
@@ -311,19 +344,69 @@ class AgentRunner:
                         title=title,
                         url=url,
                         provider=provider,
-                        snippet=None  # Don't include raw API output as snippet
+                        snippet=None
                     ))
         
-        # If riksantikvaren tools were used but no URLs found, add a general reference
-        if has_riksantikvaren and not any(s.provider == "riksantikvaren" for s in sources):
-            sources.append(SourceReference(
-                title="Askeladden – Riksantikvarens kulturminnedatabase",
-                url="https://kulturminnesok.no/",
-                provider="riksantikvaren",
-                snippet="Data hentet fra Riksantikvarens Askeladden-database"
-            ))
-        
         return sources[:10]  # Limit total sources
+    
+    def _is_source_used_in_response(self, tool_result: str, response_text: str) -> bool:
+        """Check if content from a tool result appears to be used in the response.
+        
+        Uses multiple heuristics to determine relevance:
+        1. Key names/titles from the tool result appear in the response
+        2. Specific facts/numbers from the tool result appear in the response
+        3. The query term appears in both
+        """
+        import re
+        
+        response_lower = response_text.lower()
+        result_lower = tool_result.lower()
+        
+        # Extract key terms from tool result (bold text, names, etc.)
+        bold_terms = re.findall(r'\*\*([^*]+)\*\*', tool_result)
+        
+        # Check if any bold terms (names, titles) appear in response
+        for term in bold_terms:
+            # Clean and check term (minimum 3 chars to avoid false positives)
+            term_clean = term.strip().lower()
+            if len(term_clean) >= 3 and term_clean in response_lower:
+                return True
+        
+        # Extract numbers/dates that might be facts
+        numbers = re.findall(r'\b(1[0-9]{3}|20[0-2][0-9])\b', tool_result)  # Years
+        for num in numbers:
+            if num in response_text:
+                return True
+        
+        # Check for kommune/location names
+        kommune_match = re.search(r'Kommune:\s*(\w+)', tool_result)
+        if kommune_match:
+            kommune = kommune_match.group(1).lower()
+            if kommune in response_lower:
+                return True
+        
+        # Check for kategori/type
+        kategori_match = re.search(r'Kategori:\s*([^\n]+)', tool_result)
+        if kategori_match:
+            kategori = kategori_match.group(1).strip().lower()
+            if len(kategori) >= 4 and kategori in response_lower:
+                return True
+        
+        # Fallback: check for significant word overlap (at least 3 significant words)
+        # Extract words longer than 5 chars from result
+        result_words = set(re.findall(r'\b[a-zA-ZæøåÆØÅ]{6,}\b', result_lower))
+        response_words = set(re.findall(r'\b[a-zA-ZæøåÆØÅ]{6,}\b', response_lower))
+        
+        overlap = result_words & response_words
+        # Filter out common words
+        common_words = {'kulturminner', 'kulturminne', 'riksantikvaren', 'norway', 'norwegian', 
+                       'wikipedia', 'artikkel', 'source', 'kilder', 'beskrivelse'}
+        meaningful_overlap = overlap - common_words
+        
+        if len(meaningful_overlap) >= 2:
+            return True
+        
+        return False
     
     def _extract_related_queries(self, response_text: str) -> list[str]:
         """Extract related queries from the response."""
@@ -434,6 +517,8 @@ class AgentRunner:
                     ]
                 })
                 
+                # Prepare all tool calls for parallel execution
+                tool_call_info = []
                 for tool_call in message.tool_calls:
                     tool_name = tool_call.function.name
                     tools_used.append(tool_name)
@@ -448,11 +533,28 @@ class AgentRunner:
                     except json.JSONDecodeError:
                         arguments = {}
                     
-                    # Emit tool start event
+                    tool_call_info.append((tool_call.id, tool_name, arguments))
+                
+                # Emit all tool start events
+                for _, tool_name, arguments in tool_call_info:
                     yield ToolStartEvent(tool=tool_name, arguments=arguments)
-                    
-                    # Execute tool
+                
+                # Execute all tools in PARALLEL using asyncio.gather
+                if len(tool_call_info) > 1:
+                    logger.info(f"Executing {len(tool_call_info)} tools in parallel")
+                
+                async def execute_with_context(tool_name: str, arguments: dict) -> tuple[str, str, dict]:
                     result = await self._execute_tool(tool_name, arguments)
+                    return (tool_name, result, arguments)
+                
+                parallel_results = await asyncio.gather(*[
+                    execute_with_context(tool_name, arguments)
+                    for _, tool_name, arguments in tool_call_info
+                ])
+                
+                # Process results and emit end events
+                for i, (tool_call_id, tool_name, arguments) in enumerate(tool_call_info):
+                    _, result, _ = parallel_results[i]
                     tool_results.append((tool_name, result, arguments))
                     
                     # Emit tool end event
@@ -461,7 +563,7 @@ class AgentRunner:
                     
                     messages.append({
                         "role": "tool",
-                        "tool_call_id": tool_call.id,
+                        "tool_call_id": tool_call_id,
                         "content": result,
                     })
                 
@@ -508,8 +610,8 @@ class AgentRunner:
         # Build final structured response
         processing_time_ms = int((time.time() - start_time) * 1000)
         
-        # Extract sources from tool results
-        extracted_sources = self._extract_sources_from_tool_results(tool_results)
+        # Extract sources from tool results (only those actually used in response)
+        extracted_sources = self._extract_sources_from_tool_results(tool_results, full_response_text)
         
         # Extract related queries from response (before cleaning)
         related_queries = self._extract_related_queries(full_response_text)

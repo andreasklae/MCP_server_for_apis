@@ -4,27 +4,45 @@ import json
 import logging
 from typing import Any
 
-from src.utils.http import create_http_client
+from src.utils.http import fetch_json
 
 logger = logging.getLogger(__name__)
 
+# Only fetch fields we actually use in formatting - reduces response size significantly
+ESSENTIAL_FIELDS = (
+    "OBJECTID,navn,Navn,lokalitetsnavn,Lokalitetsnavn,tittel,"
+    "kategori,kulturminnekategori,kommune,fylke,vernetype,vernestatus,"
+    "datering,kulturminnedatering,funksjon,kulturminneopprinneligfunksjon,"
+    "linkKulturminnesok"
+)
+
 
 class RiksantikvarenArcGISClient:
-    """Client for the Riksantikvaren ArcGIS REST API."""
+    """Client for the Riksantikvaren ArcGIS REST API.
+    
+    Uses shared HTTP client with connection pooling for better performance.
+    """
 
     BASE_URL = "https://kart.ra.no/arcgis/rest/services/Distribusjon"
+    
+    # Cache TTLs
+    SERVICES_CACHE_TTL = 3600  # 1 hour for service list
+    QUERY_TIMEOUT = 30  # 30s timeout for queries
 
     async def list_services(self) -> dict[str, Any]:
         """
         List available map services.
         
+        Cached for 1 hour as services rarely change.
+        
         Returns:
             Services metadata
         """
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(f"{self.BASE_URL}", params={"f": "json"})
-            response.raise_for_status()
-            return response.json()
+        return await fetch_json(
+            f"{self.BASE_URL}",
+            params={"f": "json"},
+            cache_ttl=self.SERVICES_CACHE_TTL,
+        )
 
     async def get_service_info(self, service_name: str) -> dict[str, Any]:
         """
@@ -36,13 +54,11 @@ class RiksantikvarenArcGISClient:
         Returns:
             Service metadata including layers
         """
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(
-                f"{self.BASE_URL}/{service_name}/MapServer",
-                params={"f": "json"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await fetch_json(
+            f"{self.BASE_URL}/{service_name}/MapServer",
+            params={"f": "json"},
+            cache_ttl=self.SERVICES_CACHE_TTL,
+        )
 
     async def query_layer(
         self,
@@ -52,7 +68,7 @@ class RiksantikvarenArcGISClient:
         geometry: dict[str, Any] | None = None,
         geometry_type: str = "esriGeometryEnvelope",
         spatial_rel: str = "esriSpatialRelIntersects",
-        out_fields: str = "*",
+        out_fields: str | None = None,
         return_geometry: bool = True,
         limit: int = 100,
         offset: int = 0,
@@ -67,14 +83,18 @@ class RiksantikvarenArcGISClient:
             geometry: Geometry for spatial query (JSON)
             geometry_type: Type of geometry
             spatial_rel: Spatial relationship
-            out_fields: Fields to return (* for all)
+            out_fields: Fields to return (defaults to essential fields only)
             return_geometry: Whether to include geometry
             limit: Max records
             offset: Result offset
         
         Returns:
-            Query results (GeoJSON if f=geojson)
+            Query results (GeoJSON)
         """
+        # Use essential fields by default to reduce response size
+        if out_fields is None:
+            out_fields = ESSENTIAL_FIELDS
+        
         params: dict[str, Any] = {
             "where": where,
             "outFields": out_fields,
@@ -91,13 +111,11 @@ class RiksantikvarenArcGISClient:
             params["spatialRel"] = spatial_rel
             params["inSR"] = "4326"
 
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(
-                f"{self.BASE_URL}/{service_name}/MapServer/{layer_id}/query",
-                params=params
-            )
-            response.raise_for_status()
-            return response.json()
+        return await fetch_json(
+            f"{self.BASE_URL}/{service_name}/MapServer/{layer_id}/query",
+            params=params,
+            timeout=self.QUERY_TIMEOUT,
+        )
 
     async def query_nearby(
         self,
@@ -106,7 +124,7 @@ class RiksantikvarenArcGISClient:
         lat: float,
         lon: float,
         distance: int = 1000,  # meters
-        out_fields: str = "*",
+        out_fields: str | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
         """
@@ -118,12 +136,16 @@ class RiksantikvarenArcGISClient:
             lat: Latitude
             lon: Longitude
             distance: Search distance in meters
-            out_fields: Fields to return
+            out_fields: Fields to return (defaults to essential fields)
             limit: Max records
         
         Returns:
             GeoJSON FeatureCollection
         """
+        # Use essential fields by default to reduce response size
+        if out_fields is None:
+            out_fields = ESSENTIAL_FIELDS
+        
         geometry = {"x": lon, "y": lat}
         
         params = {
@@ -141,13 +163,11 @@ class RiksantikvarenArcGISClient:
             "resultRecordCount": limit,
         }
 
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(
-                f"{self.BASE_URL}/{service_name}/MapServer/{layer_id}/query",
-                params=params
-            )
-            response.raise_for_status()
-            return response.json()
+        return await fetch_json(
+            f"{self.BASE_URL}/{service_name}/MapServer/{layer_id}/query",
+            params=params,
+            timeout=self.QUERY_TIMEOUT,
+        )
 
     async def query_bbox(
         self,
@@ -157,7 +177,7 @@ class RiksantikvarenArcGISClient:
         min_lat: float,
         max_lon: float,
         max_lat: float,
-        out_fields: str = "*",
+        out_fields: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
         """
@@ -167,7 +187,7 @@ class RiksantikvarenArcGISClient:
             service_name: Service name
             layer_id: Layer ID
             min_lon, min_lat, max_lon, max_lat: Bounding box
-            out_fields: Fields to return
+            out_fields: Fields to return (defaults to essential fields)
             limit: Max records
         
         Returns:

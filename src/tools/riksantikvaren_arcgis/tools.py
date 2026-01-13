@@ -1,6 +1,7 @@
 """Riksantikvaren ArcGIS REST API provider tools."""
 
 import logging
+import math
 from typing import Any
 
 from src.mcp.models import TextContent
@@ -15,8 +16,30 @@ from src.tools.riksantikvaren_arcgis.client import (
 logger = logging.getLogger(__name__)
 
 
-def format_feature(feature: dict[str, Any], index: int = 0) -> str:
-    """Format a GeoJSON feature for display."""
+def _calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance between two points in meters using Haversine formula."""
+    R = 6371000  # Earth's radius in meters
+    
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    
+    a = math.sin(delta_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    
+    return R * c
+
+
+def format_feature(feature: dict[str, Any], index: int = 0, center_lat: float | None = None, center_lon: float | None = None) -> str:
+    """Format a GeoJSON feature for display.
+    
+    Args:
+        feature: GeoJSON feature
+        index: Feature index for fallback naming
+        center_lat: Optional center latitude for distance calculation
+        center_lon: Optional center longitude for distance calculation
+    """
     props = feature.get("properties", {})
     geometry = feature.get("geometry", {})
     
@@ -35,8 +58,8 @@ def format_feature(feature: dict[str, Any], index: int = 0) -> str:
     # Add key properties (case-insensitive matching)
     prop_lower = {k.lower(): v for k, v in props.items()}
     
-    if prop_lower.get("kategori"):
-        lines.append(f"  Kategori: {prop_lower['kategori']}")
+    if prop_lower.get("kategori") or prop_lower.get("kulturminnekategori"):
+        lines.append(f"  Kategori: {prop_lower.get('kategori') or prop_lower.get('kulturminnekategori')}")
     if prop_lower.get("kommune"):
         lines.append(f"  Kommune: {prop_lower['kommune']}")
     if prop_lower.get("fylke"):
@@ -45,16 +68,41 @@ def format_feature(feature: dict[str, Any], index: int = 0) -> str:
         lines.append(f"  Vernetype: {prop_lower['vernetype']}")
     if prop_lower.get("vernestatus"):
         lines.append(f"  Vernestatus: {prop_lower['vernestatus']}")
-    if prop_lower.get("datering"):
-        lines.append(f"  Datering: {prop_lower['datering']}")
-    if prop_lower.get("funksjon"):
-        lines.append(f"  Funksjon: {prop_lower['funksjon']}")
+    if prop_lower.get("datering") or prop_lower.get("kulturminnedatering"):
+        lines.append(f"  Datering: {prop_lower.get('datering') or prop_lower.get('kulturminnedatering')}")
+    if prop_lower.get("funksjon") or prop_lower.get("kulturminneopprinneligfunksjon"):
+        lines.append(f"  Funksjon: {prop_lower.get('funksjon') or prop_lower.get('kulturminneopprinneligfunksjon')}")
     
-    # Add coordinates if point geometry
+    # Add link to kulturminnesok (ArcGIS uses 'linkKulturminnesok')
+    link = prop_lower.get("linkkulturminnesok")
+    if link:
+        # Normalize HTTP to HTTPS
+        if link.startswith("http://"):
+            link = "https://" + link[7:]
+        lines.append(f"  Lenke: {link}")
+    
+    # Add coordinates and distance if point geometry
+    feature_lat, feature_lon = None, None
+    
     if geometry.get("type") == "Point" and geometry.get("coordinates"):
         coords = geometry["coordinates"]
         if len(coords) >= 2:
-            lines.append(f"  Koordinater: {coords[1]:.5f}, {coords[0]:.5f}")
+            feature_lon, feature_lat = coords[0], coords[1]
+            lines.append(f"  Koordinater: {feature_lat:.5f}, {feature_lon:.5f}")
+    # Also handle Polygon centroid display
+    elif geometry.get("type") == "Polygon" and geometry.get("coordinates"):
+        coords = geometry["coordinates"][0][0] if geometry["coordinates"] else []
+        if len(coords) >= 2:
+            feature_lon, feature_lat = coords[0], coords[1]
+            lines.append(f"  Koordinater: ~{feature_lat:.5f}, {feature_lon:.5f}")
+    
+    # Calculate and add distance from center point if provided
+    if center_lat is not None and center_lon is not None and feature_lat is not None and feature_lon is not None:
+        distance = _calculate_distance(center_lat, center_lon, feature_lat, feature_lon)
+        if distance < 1000:
+            lines.append(f"  Avstand: {distance:.0f} m")
+        else:
+            lines.append(f"  Avstand: {distance/1000:.1f} km")
     
     return "\n".join(lines)
 
@@ -158,7 +206,11 @@ async def query_handler(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def nearby_handler(arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle arcgis-nearby tool call."""
+    """Handle arcgis-nearby tool call.
+    
+    This tool queries official cultural heritage sites from Riksantikvaren/Askeladden.
+    For user-contributed memories, use riksantikvaren-nearby with dataset='brukerminner'.
+    """
     lat = arguments.get("latitude")
     lon = arguments.get("longitude")
     
@@ -184,13 +236,17 @@ async def nearby_handler(arguments: dict[str, Any]) -> list[TextContent]:
         features = result.get("features", [])
         if not features:
             return [TextContent(
-                text=f"No cultural heritage sites found within {distance}m of ({lat}, {lon})"
+                text=f"No official cultural heritage sites found within {distance}m of ({lat}, {lon})"
             )]
 
-        lines = [f"Found {len(features)} sites within {distance}m of ({lat}, {lon}):\n"]
+        lines = [f"Found {len(features)} official heritage sites within {distance}m of ({lat}, {lon}):\n"]
         for i, feature in enumerate(features, 1):
-            lines.append(f"{i}. {format_feature(feature, i)}")
+            # Pass center coordinates for distance calculation
+            lines.append(f"{i}. {format_feature(feature, i, center_lat=lat, center_lon=lon)}")
             lines.append("")
+        
+        lines.append("---")
+        lines.append("*Source: Riksantikvaren/Askeladden (official, verified cultural heritage database)*")
 
         return [TextContent(text="\n".join(lines))]
 
@@ -251,7 +307,7 @@ def register_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="arcgis-nearby",
-        description="Find cultural heritage sites near coordinates using Riksantikvaren ArcGIS. Supports precise distance-based queries in meters. Good for finding nearby Viking sites, churches, burial mounds, etc.",
+        description="Find OFFICIAL cultural heritage sites near coordinates from Riksantikvaren/Askeladden database. Returns verified heritage sites (Viking finds, churches, burial mounds, rock carvings, etc.) with distances. For user-contributed memories and personal stories, use riksantikvaren-nearby with dataset='brukerminner' instead.",
         input_schema={
             "type": "object",
             "properties": {
@@ -265,7 +321,7 @@ def register_tools(registry: ToolRegistry) -> None:
                 },
                 "distance": {
                     "type": "integer",
-                    "description": "Search distance in meters",
+                    "description": "Search distance in meters (results will include calculated distance from center)",
                     "default": 1000,
                 },
                 "service": {

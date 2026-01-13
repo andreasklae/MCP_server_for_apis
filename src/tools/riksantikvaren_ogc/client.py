@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from src.utils.http import create_http_client
+from src.utils.http import fetch_json
 
 logger = logging.getLogger(__name__)
 
@@ -44,26 +44,39 @@ AVAILABLE_DATASETS = {
 
 
 class RiksantikvarenOGCClient:
-    """Client for the Riksantikvaren OGC API Features."""
+    """Client for the Riksantikvaren OGC API Features.
+    
+    Uses shared HTTP client with connection pooling and caching for better performance.
+    """
 
     BASE_URL = "https://api.ra.no"
+    
+    # Cache TTLs
+    DATASETS_CACHE_TTL = 3600  # 1 hour for dataset list (rarely changes)
+    COLLECTIONS_CACHE_TTL = 3600  # 1 hour for collections
+    FEATURES_TIMEOUT = 30  # 30s timeout for feature queries
 
     async def list_datasets(self) -> list[dict[str, Any]]:
         """
         List available datasets (APIs).
         
+        Cached for 1 hour as datasets rarely change.
+        
         Returns:
             List of dataset metadata
         """
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(f"{self.BASE_URL}", params={"f": "json"})
-            response.raise_for_status()
-            data = response.json()
-            return data.get("apis", [])
+        data = await fetch_json(
+            f"{self.BASE_URL}",
+            params={"f": "json"},
+            cache_ttl=self.DATASETS_CACHE_TTL,
+        )
+        return data.get("apis", [])
 
     async def list_collections(self, dataset_id: str = "kulturminner") -> list[dict[str, Any]]:
         """
         List available collections within a dataset.
+        
+        Cached for 1 hour as collections rarely change.
         
         Args:
             dataset_id: Dataset identifier (e.g., 'kulturminner', 'kulturmiljoer')
@@ -71,14 +84,12 @@ class RiksantikvarenOGCClient:
         Returns:
             List of collection metadata
         """
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(
-                f"{self.BASE_URL}/{dataset_id}/collections",
-                params={"f": "json"}
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("collections", [])
+        data = await fetch_json(
+            f"{self.BASE_URL}/{dataset_id}/collections",
+            params={"f": "json"},
+            cache_ttl=self.COLLECTIONS_CACHE_TTL,
+        )
+        return data.get("collections", [])
 
     async def get_collection(self, dataset_id: str, collection_id: str) -> dict[str, Any]:
         """
@@ -91,13 +102,11 @@ class RiksantikvarenOGCClient:
         Returns:
             Collection metadata
         """
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(
-                f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}",
-                params={"f": "json"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await fetch_json(
+            f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}",
+            params={"f": "json"},
+            cache_ttl=self.COLLECTIONS_CACHE_TTL,
+        )
 
     async def get_features(
         self,
@@ -129,13 +138,11 @@ class RiksantikvarenOGCClient:
         if bbox:
             params["bbox"] = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
 
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(
-                f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}/items",
-                params=params
-            )
-            response.raise_for_status()
-            return response.json()
+        return await fetch_json(
+            f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}/items",
+            params=params,
+            timeout=self.FEATURES_TIMEOUT,
+        )
 
     async def get_feature(
         self,
@@ -146,6 +153,8 @@ class RiksantikvarenOGCClient:
         """
         Get a single feature by ID.
         
+        Individual features cached for 5 minutes (default TTL).
+        
         Args:
             feature_id: Feature identifier
             dataset_id: Dataset identifier
@@ -154,13 +163,12 @@ class RiksantikvarenOGCClient:
         Returns:
             GeoJSON Feature
         """
-        async with create_http_client(timeout=60) as client:
-            response = await client.get(
-                f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}/items/{feature_id}",
-                params={"f": "json"}
-            )
-            response.raise_for_status()
-            return response.json()
+        return await fetch_json(
+            f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}/items/{feature_id}",
+            params={"f": "json"},
+            timeout=self.FEATURES_TIMEOUT,
+            cache_ttl=300,  # Cache individual features for 5 minutes
+        )
 
     async def search_nearby(
         self,
