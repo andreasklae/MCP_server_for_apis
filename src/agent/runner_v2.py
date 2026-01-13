@@ -346,14 +346,32 @@ class AgentRunnerV2:
                 {"role": "user", "content": request.message}
             ]
             
-            router_response = self.client.chat.completions.create(
-                model=self.router_model,
-                messages=router_messages,
-                tools=tools,
-                tool_choice="auto",
-                max_tokens=150,
-                parallel_tool_calls=True,
-            )
+            # Try router model first, fall back to responder if rate limited
+            try:
+                router_response = self.client.chat.completions.create(
+                    model=self.router_model,
+                    messages=router_messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    max_tokens=150,
+                    parallel_tool_calls=True,
+                )
+            except Exception as e:
+                error_str = str(e)
+                # Check if it's a rate limit error for the router model
+                if "RateLimitReached" in error_str or "rate_limit" in error_str.lower():
+                    logger.warning(f"Rate limit hit for {self.router_model}, falling back to {self.responder_model}")
+                    # Fall back to using responder model for routing
+                    router_response = self.client.chat.completions.create(
+                        model=self.responder_model,
+                        messages=router_messages,
+                        tools=tools,
+                        tool_choice="auto",
+                        max_tokens=150,
+                        parallel_tool_calls=True,
+                    )
+                else:
+                    raise
             
             tool_calls = router_response.choices[0].message.tool_calls or []
             
