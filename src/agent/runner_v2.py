@@ -163,6 +163,9 @@ class AgentRunnerV2:
     - gpt-4o for quality response generation
     """
     
+    # Class-level circuit breaker for rate-limited router
+    _router_rate_limited_until = None
+    
     def __init__(self, api_key: str):
         """Initialize with OpenAI API key (works with both OpenAI and Azure OpenAI)."""
         settings = get_settings()
@@ -346,21 +349,38 @@ class AgentRunnerV2:
                 {"role": "user", "content": request.message}
             ]
             
+            # Check circuit breaker - if mini was recently rate-limited, skip it
+            use_router_model = self.router_model
+            if (AgentRunnerV2._router_rate_limited_until and 
+                time.time() < AgentRunnerV2._router_rate_limited_until and
+                self.router_model != self.responder_model):
+                logger.info(f"Skipping {self.router_model} (circuit breaker active), using {self.responder_model}")
+                use_router_model = self.responder_model
+            
             # Try router model first, fall back to responder if rate limited
             try:
                 router_response = self.client.chat.completions.create(
-                    model=self.router_model,
+                    model=use_router_model,
                     messages=router_messages,
                     tools=tools,
                     tool_choice="auto",
                     max_tokens=150,
                     parallel_tool_calls=True,
                 )
+                # If mini worked, reset circuit breaker
+                if use_router_model == self.router_model and AgentRunnerV2._router_rate_limited_until:
+                    logger.info(f"{self.router_model} working again, resetting circuit breaker")
+                    AgentRunnerV2._router_rate_limited_until = None
             except Exception as e:
                 error_str = str(e)
-                # Check if it's a rate limit error for the router model
-                if "RateLimitReached" in error_str or "rate_limit" in error_str.lower():
-                    logger.warning(f"Rate limit hit for {self.router_model}, falling back to {self.responder_model}")
+                # Check if it's a rate limit error
+                if ("RateLimitReached" in error_str or 
+                    "rate_limit" in error_str.lower() or 
+                    "429" in error_str or
+                    "Too Many Requests" in error_str):
+                    logger.warning(f"Rate limit hit for {use_router_model}, falling back to {self.responder_model}")
+                    # Set circuit breaker for 5 minutes
+                    AgentRunnerV2._router_rate_limited_until = time.time() + 300
                     # Fall back to using responder model for routing
                     router_response = self.client.chat.completions.create(
                         model=self.responder_model,
