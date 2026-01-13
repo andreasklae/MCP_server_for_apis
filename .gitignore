@@ -37,6 +37,8 @@ env/
 .env
 .env.local
 *.env
+.env.*
+.env.backup
 
 # Testing
 .coverage
@@ -57,4 +59,3 @@ Thumbs.db
 
 # Local artifacts
 artifacts/
-
