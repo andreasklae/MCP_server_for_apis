@@ -372,7 +372,7 @@ class AgentRunnerV2:
                 )
                 
                 for chunk in stream:
-                    if chunk.choices[0].delta.content:
+                    if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content:
                         token = chunk.choices[0].delta.content
                         full_response_text += token
                         yield TokenEvent(content=token)
@@ -451,7 +451,7 @@ class AgentRunnerV2:
                 )
                 
                 for chunk in stream:
-                    if chunk.choices[0].delta.content:
+                    if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content:
                         token = chunk.choices[0].delta.content
                         full_response_text += token
                         yield TokenEvent(content=token)
