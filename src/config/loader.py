@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     
     # Azure OpenAI settings (if using Azure instead of OpenAI direct)
     azure_openai_endpoint: str = ""  # e.g., https://your-resource.openai.azure.com
-    azure_openai_deployment: str = "gpt-4o"  # deployment name in Azure
+    azure_openai_deployment: str = "gpt-4o"  # deployment name in Azure (for responder)
+    azure_openai_deployment_router: str = ""  # optional: router deployment name (defaults to deriving from main or using same)
     azure_openai_api_version: str = "2024-02-15-preview"
 
     # Rate limiting

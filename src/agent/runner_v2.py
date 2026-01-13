@@ -174,10 +174,13 @@ class AgentRunnerV2:
                 api_version=settings.azure_openai_api_version,
                 azure_endpoint=settings.azure_openai_endpoint,
             )
-            # For Azure, try to derive mini deployment name from main deployment
-            # If you have separate deployments, they should follow naming pattern
             main_deployment = settings.azure_openai_deployment
-            if "gpt-4o" in main_deployment and "mini" not in main_deployment:
+            
+            # Check if explicit router deployment is set
+            if settings.azure_openai_deployment_router:
+                self.router_model = settings.azure_openai_deployment_router
+                logger.info(f"Router deployment: {self.router_model} (from AZURE_OPENAI_DEPLOYMENT_ROUTER)")
+            elif "gpt-4o" in main_deployment and "mini" not in main_deployment:
                 # Try to derive mini deployment name (e.g., "gpt-4o" -> "gpt-4o-mini")
                 self.router_model = main_deployment.replace("gpt-4o", "gpt-4o-mini")
                 logger.info(f"Router deployment: {self.router_model} (derived from {main_deployment})")
@@ -186,6 +189,7 @@ class AgentRunnerV2:
                 # use the same deployment for both (works if you only have one deployment)
                 self.router_model = main_deployment
                 logger.info(f"Using same deployment for router: {self.router_model}")
+            
             self.responder_model = main_deployment
             logger.info(f"Responder deployment: {self.responder_model}")
         else:
