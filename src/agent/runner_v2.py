@@ -18,9 +18,10 @@ import logging
 import time
 from typing import Any, AsyncGenerator
 
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 from pydantic import BaseModel
 
+from src.config.loader import get_settings
 from src.mcp.models import TextContent
 from src.mcp.registry import get_registry
 
@@ -163,9 +164,36 @@ class AgentRunnerV2:
     """
     
     def __init__(self, api_key: str):
-        self.client = OpenAI(api_key=api_key)
-        self.router_model = "gpt-4o-mini"
-        self.responder_model = "gpt-4o"
+        """Initialize with OpenAI API key (works with both OpenAI and Azure OpenAI)."""
+        settings = get_settings()
+        
+        if settings.use_azure_openai:
+            logger.info(f"Using Azure OpenAI: {settings.azure_openai_endpoint}")
+            self.client = AzureOpenAI(
+                api_key=api_key,
+                api_version=settings.azure_openai_api_version,
+                azure_endpoint=settings.azure_openai_endpoint,
+            )
+            # For Azure, try to derive mini deployment name from main deployment
+            # If you have separate deployments, they should follow naming pattern
+            main_deployment = settings.azure_openai_deployment
+            if "gpt-4o" in main_deployment and "mini" not in main_deployment:
+                # Try to derive mini deployment name (e.g., "gpt-4o" -> "gpt-4o-mini")
+                self.router_model = main_deployment.replace("gpt-4o", "gpt-4o-mini")
+                logger.info(f"Router deployment: {self.router_model} (derived from {main_deployment})")
+            else:
+                # If deployment name doesn't match pattern or already contains "mini",
+                # use the same deployment for both (works if you only have one deployment)
+                self.router_model = main_deployment
+                logger.info(f"Using same deployment for router: {self.router_model}")
+            self.responder_model = main_deployment
+            logger.info(f"Responder deployment: {self.responder_model}")
+        else:
+            logger.info("Using OpenAI direct API")
+            self.client = OpenAI(api_key=api_key)
+            self.router_model = "gpt-4o-mini"
+            self.responder_model = "gpt-4o"
+        
         self.registry = get_registry()
     
     def _get_enabled_tools(self, sources: list[str]) -> list[dict]:
