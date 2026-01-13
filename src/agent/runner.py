@@ -332,10 +332,34 @@ class AgentRunner:
                                 title = "Kulturminnesøk"
                         provider = "riksantikvaren"
                     elif "snl.no" in url:
-                        title = arguments.get("query", "Artikkel") + " – Store norske leksikon"
+                        # Extract article name from URL path
+                        # URLs like: https://snl.no/Djengis_Khan or https://lille.snl.no/Djengis_Khan
+                        from urllib.parse import unquote
+                        url_match = re.search(r'snl\.no/([^?#]+)', url)
+                        if url_match:
+                            article_slug = url_match.group(1)
+                            # Convert URL encoding and underscores to readable title
+                            article_name = unquote(article_slug).replace('_', ' ')
+                            title = f"{article_name} – Store norske leksikon"
+                        else:
+                            title = arguments.get("query", "Artikkel") + " – Store norske leksikon"
                         provider = "snl"
                     elif "wikipedia.org" in url:
-                        title = arguments.get("query", "Artikkel") + " – Wikipedia"
+                        # Extract article name from URL path
+                        # URLs like: https://en.wikipedia.org/wiki/Genghis_Khan
+                        from urllib.parse import unquote
+                        url_match = re.search(r'wikipedia\.org/wiki/([^?#]+)', url)
+                        if url_match:
+                            article_slug = url_match.group(1)
+                            article_name = unquote(article_slug).replace('_', ' ')
+                            title = f"{article_name} – Wikipedia"
+                        else:
+                            # Handle curid URLs like https://en.wikipedia.org/?curid=12345
+                            curid_match = re.search(r'curid=(\d+)', url)
+                            if curid_match:
+                                title = f"Wikipedia artikkel #{curid_match.group(1)}"
+                            else:
+                                title = arguments.get("query", "Artikkel") + " – Wikipedia"
                         provider = "wikipedia"
                     else:
                         title = arguments.get("query", arguments.get("identifier", "Kilde"))
