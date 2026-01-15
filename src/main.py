@@ -75,8 +75,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # Create FastAPI app
 app = FastAPI(
     title="Kulturarv MCP Server",
-    description="MCP server for Norwegian cultural heritage APIs with integrated AI chat agent",
-    version="2.0.0",
+    description="MCP server for Norwegian cultural heritage APIs - OpenAI Agent Builder compatible",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -301,8 +301,7 @@ async def chat_endpoint(request: Request) -> JSONResponse:
         )
     
     # Import here to avoid circular imports
-    # V2 uses two-model architecture: gpt-4o-mini for routing, gpt-4o for response
-    from src.agent.runner_v2 import AgentRunnerV2 as AgentRunner, ChatRequest
+    from src.agent.runner import AgentRunner, ChatRequest
     
     try:
         chat_request = ChatRequest(**body)
@@ -353,8 +352,7 @@ async def chat_stream_endpoint(request: Request):
     - error: Error occurred
     """
     from sse_starlette.sse import EventSourceResponse
-    # V2 uses two-model architecture: gpt-4o-mini for routing, gpt-4o for response
-    from src.agent.runner_v2 import AgentRunnerV2 as AgentRunner, ChatRequest, ErrorEvent
+    from src.agent.runner import AgentRunner, ChatRequest, ErrorEvent
     
     settings = get_settings()
     log = get_logger("chat_stream")
