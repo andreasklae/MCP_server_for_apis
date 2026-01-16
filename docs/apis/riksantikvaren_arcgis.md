@@ -55,7 +55,7 @@ GET https://kart.ra.no/arcgis/rest/services/Distribusjon/{ServiceName}/MapServer
 ```
 
 Parameters:
-- `where` — SQL-like attribute filter (e.g., `kategori='Kirke'`)
+- `where` — SQL-like attribute filter (e.g., `kategori='Kirke'`, `UPPER(navn) LIKE UPPER('%slott%')` for case-insensitive search)
 - `geometry` — spatial filter geometry (JSON)
 - `geometryType` — type of geometry (`esriGeometryPoint`, `esriGeometryEnvelope`, etc.)
 - `spatialRel` — spatial relationship (`esriSpatialRelIntersects`, `esriSpatialRelWithin`, etc.)
@@ -92,6 +92,19 @@ GET /query?
   returnGeometry=true&
   f=geojson
 ```
+
+### Query Example: Text Search
+```
+GET /query?
+  where=UPPER(navn) LIKE UPPER('%slott%')&
+  outFields=navn,kommune,fylke&
+  returnGeometry=true&
+  outSR=4326&
+  f=geojson&
+  resultRecordCount=50
+```
+
+**Note**: The OGC API with CQL2 filters is generally better for text search as it supports the `CASEI()` function. The Arc GIS API requires using `UPPER()` for case-insensitive matching and the syntax is more verbose.
 
 ### Identify (Multi-layer Query)
 ```

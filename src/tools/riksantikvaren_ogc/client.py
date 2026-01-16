@@ -115,17 +115,19 @@ class RiksantikvarenOGCClient:
         bbox: tuple[float, float, float, float] | None = None,
         limit: int = 50,
         offset: int = 0,
+        cql_filter: str | None = None,
     ) -> dict[str, Any]:
         """
         Query features from a collection.
-        
+
         Args:
             dataset_id: Dataset identifier (default: 'kulturminner')
             collection_id: Collection identifier (default: 'kulturminner')
             bbox: Bounding box as (min_lon, min_lat, max_lon, max_lat)
             limit: Maximum features to return
             offset: Pagination offset
-        
+            cql_filter: CQL2 filter expression for advanced queries (e.g., text search)
+
         Returns:
             GeoJSON FeatureCollection
         """
@@ -137,6 +139,10 @@ class RiksantikvarenOGCClient:
 
         if bbox:
             params["bbox"] = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
+
+        if cql_filter:
+            params["filter"] = cql_filter
+            params["filter-lang"] = "cql2-text"
 
         return await fetch_json(
             f"{self.BASE_URL}/{dataset_id}/collections/{collection_id}/items",
@@ -181,7 +187,7 @@ class RiksantikvarenOGCClient:
     ) -> dict[str, Any]:
         """
         Search for features near a point using bbox.
-        
+
         Args:
             lat: Latitude
             lon: Longitude
@@ -189,7 +195,7 @@ class RiksantikvarenOGCClient:
             dataset_id: Dataset to search
             collection_id: Collection to search
             limit: Maximum results
-        
+
         Returns:
             GeoJSON FeatureCollection
         """
@@ -203,6 +209,50 @@ class RiksantikvarenOGCClient:
             dataset_id=dataset_id,
             collection_id=collection_id,
             bbox=bbox,
+            limit=limit,
+        )
+
+    async def search_text(
+        self,
+        query: str,
+        dataset_id: str = "kulturminner",
+        collection_id: str = "kulturminner",
+        search_fields: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Search for features by text using CQL2 LIKE with case-insensitive matching.
+
+        Args:
+            query: Search term(s) to find in feature names/descriptions
+            dataset_id: Dataset identifier (default: 'kulturminner')
+            collection_id: Collection identifier (default: 'kulturminner')
+            search_fields: Fields to search (default: ['navn', 'informasjon'])
+            limit: Maximum results
+
+        Returns:
+            GeoJSON FeatureCollection
+
+        Example:
+            # Search for "slott" in kulturminner
+            results = await client.search_text("slott", dataset_id="kulturminner")
+        """
+        if search_fields is None:
+            search_fields = ["navn", "informasjon"]
+
+        # Build CQL2 filter with case-insensitive LIKE for each field
+        # Format: CASEI(field) LIKE CASEI('%term%')
+        filter_parts = []
+        for field in search_fields:
+            filter_parts.append(f"CASEI({field}) LIKE CASEI('%{query}%')")
+
+        # Combine with OR operator
+        cql_filter = " OR ".join(filter_parts)
+
+        return await self.get_features(
+            dataset_id=dataset_id,
+            collection_id=collection_id,
+            cql_filter=cql_filter,
             limit=limit,
         )
 
