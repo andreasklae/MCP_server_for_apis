@@ -54,9 +54,12 @@ Data from Riksantikvaren (Norwegian Directorate for Cultural Heritage) is licens
   - `/collections/askeladden` — official cultural heritage register
   - `/collections/brukeminner` — user-contributed cultural memories
 - **Features:**
-  - Supports `bbox` for geographic filtering
+  - Supports `bbox` for geographic filtering (works reliably for brukerminner only)
+  - **Supports CQL2 `filter` parameter for text search** using `CASEI()` function
   - Returns GeoJSON
   - Pagination via `limit` and `offset`
+- **Text Search:** Use CQL2 filter with `CASEI()` for case-insensitive name matching:
+  - Example: `filter=CASEI(navn) LIKE CASEI('%slott%')&filter-lang=cql2-text`
 
 #### 3b. ArcGIS REST API (kart.ra.no)
 - **Base URL:** `https://kart.ra.no/arcgis/rest/services/Distribusjon`

@@ -347,6 +347,45 @@ async def nearby_handler(arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(text=f"Error searching nearby: {str(e)}")]
 
 
+async def search_text_handler(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle riksantikvaren-search-text tool call."""
+    query = arguments.get("query", "")
+
+    if not query:
+        return [TextContent(text="Error: 'query' argument is required")]
+
+    dataset_id = arguments.get("dataset", "kulturminner")
+    collection_id = arguments.get("collection", "kulturminner")
+    limit = arguments.get("limit", 20)
+
+    try:
+        client = get_client()
+        result = await client.search_text(
+            query=query,
+            dataset_id=dataset_id,
+            collection_id=collection_id,
+            limit=limit,
+        )
+
+        features = result.get("features", [])
+        total = result.get("numberMatched", len(features))
+
+        if not features:
+            return [TextContent(text=f"No cultural heritage sites found matching '{query}'")]
+
+        lines = [f"Found {total} sites matching '{query}' (showing {len(features)}):\n"]
+
+        for i, feature in enumerate(features, 1):
+            lines.append(f"{i}. {format_feature(feature, i)}")
+            lines.append("")
+
+        return [TextContent(text="\n".join(lines))]
+
+    except Exception as e:
+        logger.exception("Riksantikvaren search text error")
+        return [TextContent(text=f"Error searching for '{query}': {str(e)}")]
+
+
 def register_tools(registry: ToolRegistry) -> None:
     """Register Riksantikvaren OGC tools with the registry."""
 
@@ -468,5 +507,36 @@ def register_tools(registry: ToolRegistry) -> None:
             "required": ["latitude", "longitude"],
         },
         handler=nearby_handler,
+    )
+
+    registry.register(
+        name="riksantikvaren-search-text",
+        description="Search for cultural heritage sites by name or description using case-insensitive text matching. Works for all datasets including 'kulturminner' (official sites), 'brukerminner' (user memories), and 'kulturmiljoer' (environments). Use this to find sites by name like 'slott', 'festning', 'kirke', etc.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search term(s) to find in site names and descriptions (case-insensitive)",
+                },
+                "dataset": {
+                    "type": "string",
+                    "description": "Dataset to search: 'kulturminner' (official sites), 'brukerminner' (user memories), 'kulturmiljoer' (environments)",
+                    "default": "kulturminner",
+                },
+                "collection": {
+                    "type": "string",
+                    "description": "Collection ID (defaults to match dataset)",
+                    "default": "kulturminner",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum results to return",
+                    "default": 20,
+                },
+            },
+            "required": ["query"],
+        },
+        handler=search_text_handler,
     )
 

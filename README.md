@@ -133,6 +133,7 @@ enabled_providers:
 | `riksantikvaren-features` | Query features (bbox works for brukerminner only) |
 | `riksantikvaren-feature` | Get single feature by ID |
 | `riksantikvaren-nearby` | Find **user memories** (brukerminner) near coordinates |
+| `riksantikvaren-search-text` | **Search sites by name** using case-insensitive text matching |
 
 ### Riksantikvaren ArcGIS Tools
 | Tool | Description |
@@ -141,7 +142,7 @@ enabled_providers:
 | `arcgis-query` | Query features with SQL or bbox |
 | `arcgis-nearby` | Find **official heritage sites** near coordinates (recommended) |
 
-> **Note**: For location-based queries, use `arcgis-nearby` for official kulturminner and `riksantikvaren-nearby` for user-contributed brukerminner. The OGC API's bbox filter doesn't work reliably for kulturminner.
+> **Note**: For text search (e.g., finding "slott", "festning", "kirke"), use `riksantikvaren-search-text`. For location-based queries, use `arcgis-nearby` for official kulturminner and `riksantikvaren-nearby` for user-contributed brukerminner.
 
 ## Adding a New API Provider
 
