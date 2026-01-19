@@ -11,9 +11,17 @@ services:
     environment:
       # Authentication (leave empty for open/dev mode)
       - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      # OpenAI API (for chat agent)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Azure OpenAI settings (optional)
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      - AZURE_OPENAI_DEPLOYMENT_ROUTER=${AZURE_OPENAI_DEPLOYMENT_ROUTER:-}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION:-2024-02-15-preview}
       # Rate limiting
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-false}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
+      - CHAT_RATE_LIMIT_PER_HOUR=${CHAT_RATE_LIMIT_PER_HOUR:-50}
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
@@ -44,7 +52,13 @@ services:
       - "8000:8000"
     environment:
       - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      - AZURE_OPENAI_DEPLOYMENT_ROUTER=${AZURE_OPENAI_DEPLOYMENT_ROUTER:-}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION:-2024-02-15-preview}
       - RATE_LIMIT_ENABLED=false
+      - CHAT_RATE_LIMIT_PER_HOUR=100
       - LOG_LEVEL=DEBUG
       - LOG_FORMAT=console
     volumes:

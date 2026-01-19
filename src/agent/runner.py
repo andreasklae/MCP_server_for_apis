@@ -180,7 +180,7 @@ For text-based queries about specific sites (e.g., "Tell me about Akershus festn
 For location-based queries about landmarks, castles, or historical buildings:
 1. **ALWAYS** search SNL and Wikipedia first for general information
 2. **Then** use arcgis-nearby to check for nearby registered heritage sites
-3. Synthesize all results - don't just report what's in Riksantikvaren
+3. Synthesize all results - don't just one of them
 
 ## Response Guidelines
 
@@ -229,7 +229,7 @@ class AgentRunner:
     def __init__(self, openai_api_key: str):
         """Initialize with OpenAI API key (works with both OpenAI and Azure OpenAI)."""
         settings = get_settings()
-        
+
         if settings.use_azure_openai:
             logger.info(f"Using Azure OpenAI: {settings.azure_openai_endpoint}")
             self.client = AzureOpenAI(
@@ -237,12 +237,25 @@ class AgentRunner:
                 api_version=settings.azure_openai_api_version,
                 azure_endpoint=settings.azure_openai_endpoint,
             )
-            self.model = settings.azure_openai_deployment
+            self.model = settings.azure_openai_deployment  # gpt-4o for synthesis
+
+            # Use separate router model if configured, otherwise derive from main deployment
+            if settings.azure_openai_deployment_router:
+                self.router_model = settings.azure_openai_deployment_router
+            else:
+                # Try to derive router model name (e.g., gpt-4o -> gpt-4o-mini)
+                if "gpt-4o" in settings.azure_openai_deployment and "mini" not in settings.azure_openai_deployment:
+                    self.router_model = settings.azure_openai_deployment.replace("gpt-4o", "gpt-4o-mini")
+                else:
+                    self.router_model = settings.azure_openai_deployment
+
+            logger.info(f"Router model: {self.router_model}, Synthesis model: {self.model}")
         else:
             logger.info("Using OpenAI direct API")
             self.client = OpenAI(api_key=openai_api_key)
-            self.model = "gpt-4o"
-        
+            self.router_model = "gpt-4o-mini"  # Fast router
+            self.model = "gpt-4o"  # Quality synthesis
+
         self.registry = get_registry()
     
     def _get_enabled_tools(self, sources: list[str]) -> list[dict[str, Any]]:
@@ -402,61 +415,88 @@ class AgentRunner:
     
     def _is_source_used_in_response(self, tool_result: str, response_text: str) -> bool:
         """Check if content from a tool result appears to be used in the response.
-        
+
         Uses multiple heuristics to determine relevance:
-        1. Key names/titles from the tool result appear in the response
-        2. Specific facts/numbers from the tool result appear in the response
-        3. The query term appears in both
+        1. PRIORITY: Check if the source title/name is mentioned in the response
+        2. Check if specific unique terms from the tool result appear in the response
+        3. Verify significant word overlap (but NOT generic location words)
         """
         import re
-        
+
         response_lower = response_text.lower()
         result_lower = tool_result.lower()
-        
-        # Extract key terms from tool result (bold text, names, etc.)
+
+        # Extract the primary title/name from tool result (first bold term, usually the source title)
         bold_terms = re.findall(r'\*\*([^*]+)\*\*', tool_result)
-        
-        # Check if any bold terms (names, titles) appear in response
-        for term in bold_terms:
-            # Clean and check term (minimum 3 chars to avoid false positives)
-            term_clean = term.strip().lower()
-            if len(term_clean) >= 3 and term_clean in response_lower:
-                return True
-        
-        # Extract numbers/dates that might be facts
+
+        # CRITICAL: Check if the PRIMARY source title is mentioned in response
+        # This is the most reliable indicator
+        if bold_terms:
+            primary_title = bold_terms[0].strip().lower()
+            # For Riksantikvaren sources, the first bold term is the lokalitet name
+            if len(primary_title) >= 3:
+                # Check for substantial title match (at least 60% of title words present)
+                title_words = [w for w in re.findall(r'\b[a-zA-ZæøåÆØÅ]{3,}\b', primary_title) if w not in {'for', 'ved', 'den', 'det', 'i', 'på', 'av'}]
+                if title_words:
+                    # Count how many title words appear in response
+                    matches = sum(1 for word in title_words if word in response_lower)
+                    match_ratio = matches / len(title_words)
+
+                    # If >60% of significant title words are in response, this source is relevant
+                    if match_ratio >= 0.6:
+                        return True
+
+                    # Special case: single-word titles need exact match
+                    if len(title_words) == 1 and title_words[0] in response_lower:
+                        return True
+
+        # Extract years/dates that might be specific facts
         numbers = re.findall(r'\b(1[0-9]{3}|20[0-2][0-9])\b', tool_result)  # Years
-        for num in numbers:
-            if num in response_text:
-                return True
-        
-        # Check for kommune/location names
-        kommune_match = re.search(r'Kommune:\s*(\w+)', tool_result)
-        if kommune_match:
-            kommune = kommune_match.group(1).lower()
-            if kommune in response_lower:
-                return True
-        
-        # Check for kategori/type
+        matching_years = [num for num in numbers if num in response_text]
+        # Years alone are not sufficient (too common), but combined with other signals
+
+        # Check for unique descriptive terms (kategori, vernestatus, etc.)
+        # But EXCLUDE generic location terms like kommune names
         kategori_match = re.search(r'Kategori:\s*([^\n]+)', tool_result)
+        vernestatus_match = re.search(r'Vernestatus:\s*([^\n]+)', tool_result)
+
+        unique_descriptors = []
         if kategori_match:
             kategori = kategori_match.group(1).strip().lower()
-            if len(kategori) >= 4 and kategori in response_lower:
-                return True
-        
-        # Fallback: check for significant word overlap (at least 3 significant words)
-        # Extract words longer than 5 chars from result
-        result_words = set(re.findall(r'\b[a-zA-ZæøåÆØÅ]{6,}\b', result_lower))
-        response_words = set(re.findall(r'\b[a-zA-ZæøåÆØÅ]{6,}\b', response_lower))
-        
+            # Only use specific category types, not generic ones
+            if len(kategori) >= 5 and kategori not in {'bygning', 'anlegg', 'struktur'}:
+                unique_descriptors.append(kategori)
+        if vernestatus_match:
+            vernestatus = vernestatus_match.group(1).strip().lower()
+            if len(vernestatus) >= 4:
+                unique_descriptors.append(vernestatus)
+
+        # Check if unique descriptors appear in response
+        descriptor_matches = sum(1 for desc in unique_descriptors if desc in response_lower)
+
+        # Extract significant words (6+ chars) from result
+        result_words = set(re.findall(r'\b[a-zA-ZæøåÆØÅ]{7,}\b', result_lower))
+        response_words = set(re.findall(r'\b[a-zA-ZæøåÆØÅ]{7,}\b', response_lower))
+
         overlap = result_words & response_words
-        # Filter out common words
-        common_words = {'kulturminner', 'kulturminne', 'riksantikvaren', 'norway', 'norwegian', 
-                       'wikipedia', 'artikkel', 'source', 'kilder', 'beskrivelse'}
+        # Filter out common/generic words that don't indicate topical relevance
+        common_words = {
+            'kulturminner', 'kulturminne', 'riksantikvaren', 'norway', 'norwegian',
+            'wikipedia', 'artikkel', 'source', 'kilder', 'beskrivelse',
+            'lokalitet', 'kommune', 'registrert', 'informasjon', 'historic',
+            'heritage', 'building', 'structure', 'registered', 'official',
+            # Location names that match too broadly
+            'oslo', 'bergen', 'trondheim', 'stavanger', 'tromsø', 'kristiansand'
+        }
         meaningful_overlap = overlap - common_words
-        
-        if len(meaningful_overlap) >= 2:
+
+        # Require HIGHER threshold for word overlap (3+ words, not 2)
+        # Combined with descriptor matches or year matches
+        if len(meaningful_overlap) >= 3:
             return True
-        
+        elif len(meaningful_overlap) >= 2 and (descriptor_matches >= 1 or len(matching_years) >= 2):
+            return True
+
         return False
     
     def _extract_related_queries(self, response_text: str) -> list[str]:
@@ -539,9 +579,10 @@ class AgentRunner:
         tools = self._get_enabled_tools(request.sources)
         
         try:
-            # First call to check for tool use (non-streaming)
+            # First call to check for tool use (non-streaming) - use router model for efficiency
+            logger.info(f"Tool routing with {self.router_model}")
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=self.router_model,
                 messages=messages,
                 tools=tools if tools else None,
                 tool_choice="auto" if tools else None,
@@ -618,9 +659,9 @@ class AgentRunner:
                         "content": result,
                     })
                 
-                # Get next response (non-streaming for tool loop)
+                # Get next response (non-streaming for tool loop) - continue using router model
                 response = self.client.chat.completions.create(
-                    model=self.model,
+                    model=self.router_model,
                     messages=messages,
                     tools=tools if tools else None,
                     tool_choice="auto" if tools else None,
@@ -631,8 +672,9 @@ class AgentRunner:
             
             # Now stream the final response
             yield StatusEvent(message="Genererer svar...")
-            
-            # Make a streaming call for the final response
+
+            # Make a streaming call for the final response - use quality model (gpt-4o)
+            logger.info(f"Synthesizing response with {self.model}")
             stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
