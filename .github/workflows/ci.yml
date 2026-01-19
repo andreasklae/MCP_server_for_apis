@@ -3,9 +3,6 @@ name: CI/CD
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 env:
@@ -50,11 +47,10 @@ jobs:
     name: Build and Push to Azure Container Registry
     runs-on: ubuntu-latest
     needs: test
-    # Build/push on: push to main, merged PR to main, or manual trigger
+    # Build/push on: push to main (includes merged PRs) or manual trigger
     if: |
       github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
+      github.event_name == 'workflow_dispatch'
     
     outputs:
       image_tag: ${{ steps.meta.outputs.tags }}
@@ -95,11 +91,10 @@ jobs:
     name: Deploy to Azure Container Apps
     runs-on: ubuntu-latest
     needs: build-and-push
-    # Deploy on: push to main, merged PR to main, or manual trigger
+    # Deploy on: push to main (includes merged PRs) or manual trigger
     if: |
       github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
+      github.event_name == 'workflow_dispatch'
     
     steps:
       - name: Checkout code
