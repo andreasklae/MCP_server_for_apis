@@ -82,14 +82,46 @@ Copy `env.example` to `.env` and configure:
 # Authentication (leave empty for open/dev mode)
 MCP_AUTH_TOKEN=your-secret-token
 
+# OpenAI API key for chat agent (required for /api/chat endpoint)
+OPENAI_API_KEY=your-openai-key
+
+# Azure OpenAI settings (optional - if set, uses Azure instead of OpenAI direct)
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+AZURE_OPENAI_DEPLOYMENT=gpt-4o  # Synthesis model deployment name
+AZURE_OPENAI_DEPLOYMENT_ROUTER=gpt-4o-mini  # Router model deployment name (optional)
+AZURE_OPENAI_API_VERSION=2024-02-15-preview
+
 # Rate limiting
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_PER_MINUTE=60
+CHAT_RATE_LIMIT_PER_HOUR=50  # Chat endpoint rate limit (per IP)
 
 # Logging
 LOG_LEVEL=INFO
 LOG_FORMAT=json
 ```
+
+### Two-Model Architecture
+
+The chat agent (`/api/chat/stream`) uses a **two-model routing architecture** for optimal cost/performance:
+
+1. **Router Model** (gpt-4o-mini):
+   - Fast, inexpensive model for tool selection
+   - Decides which tools to call based on user query
+   - Handles tool orchestration loop
+   - Response time: ~1-2 seconds
+
+2. **Synthesis Model** (gpt-4o):
+   - High-quality model for final response generation
+   - Synthesizes information from tool results
+   - Streams tokens to client via SSE
+   - Response time: ~5-10 seconds (streaming)
+
+**Impact**: This architecture reduces API costs by ~50% while maintaining response quality. The router model makes ~3-5x more calls than the synthesis model (tool loop iterations), so using a cheaper model for routing provides significant savings.
+
+**Configuration**:
+- If `AZURE_OPENAI_DEPLOYMENT_ROUTER` is not set, the system automatically derives it from `AZURE_OPENAI_DEPLOYMENT` (e.g., `gpt-4o` → `gpt-4o-mini`)
+- For OpenAI direct API, defaults to `gpt-4o-mini` for routing and `gpt-4o` for synthesis
 
 ### API Providers
 
