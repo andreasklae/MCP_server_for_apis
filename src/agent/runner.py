@@ -226,6 +226,9 @@ Format all responses as clean markdown following these rules:
 class AgentRunner:
     """Runs the chat agent with tool calling and streaming support."""
     
+    # Class-level circuit breaker for rate-limited router
+    _router_rate_limited_until = None
+    
     def __init__(self, openai_api_key: str):
         """Initialize with OpenAI API key (works with both OpenAI and Azure OpenAI)."""
         settings = get_settings()
@@ -257,6 +260,7 @@ class AgentRunner:
             self.model = "gpt-4o"  # Quality synthesis
 
         self.registry = get_registry()
+        self.max_tool_iterations = 2  # Limit tool calling rounds to prevent excessive API calls
     
     def _get_enabled_tools(self, sources: list[str]) -> list[dict[str, Any]]:
         """Get OpenAI tool definitions for enabled sources."""
@@ -579,20 +583,61 @@ class AgentRunner:
         tools = self._get_enabled_tools(request.sources)
         
         try:
+            # Check circuit breaker - if router was recently rate-limited, skip it
+            use_router_model = self.router_model
+            if (AgentRunner._router_rate_limited_until and 
+                time.time() < AgentRunner._router_rate_limited_until and
+                self.router_model != self.model):
+                logger.info(f"Skipping {self.router_model} (circuit breaker active), using {self.model}")
+                use_router_model = self.model
+            
             # First call to check for tool use (non-streaming) - use router model for efficiency
-            logger.info(f"Tool routing with {self.router_model}")
-            response = self.client.chat.completions.create(
-                model=self.router_model,
-                messages=messages,
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None,
-                max_tokens=2048,
-                temperature=0.7,
-            )
+            logger.info(f"Tool routing with {use_router_model}")
+            
+            # Try router model first, fall back to responder if rate limited
+            try:
+                response = self.client.chat.completions.create(
+                    model=use_router_model,
+                    messages=messages,
+                    tools=tools if tools else None,
+                    tool_choice="auto" if tools else None,
+                    max_tokens=2048,
+                    temperature=0.7,
+                    parallel_tool_calls=True,  # Allow multiple tool calls in one request
+                )
+                # If router worked, reset circuit breaker
+                if use_router_model == self.router_model and AgentRunner._router_rate_limited_until:
+                    logger.info(f"{self.router_model} working again, resetting circuit breaker")
+                    AgentRunner._router_rate_limited_until = None
+            except Exception as e:
+                error_str = str(e)
+                # Check if it's a rate limit error
+                if ("RateLimitReached" in error_str or 
+                    "rate_limit" in error_str.lower() or 
+                    "429" in error_str or
+                    "Too Many Requests" in error_str):
+                    logger.warning(f"Rate limit hit for {use_router_model}, falling back to {self.model}")
+                    # Set circuit breaker for 5 minutes
+                    AgentRunner._router_rate_limited_until = time.time() + 300
+                    # Fall back to using responder model for routing
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        tools=tools if tools else None,
+                        tool_choice="auto" if tools else None,
+                        max_tokens=2048,
+                        temperature=0.7,
+                        parallel_tool_calls=True,
+                    )
+                else:
+                    raise
+            
             message = response.choices[0].message
             
-            # Handle tool calls
-            while message.tool_calls:
+            # Handle tool calls - limit iterations to prevent excessive API calls
+            iteration_count = 0
+            while message.tool_calls and iteration_count < self.max_tool_iterations:
+                iteration_count += 1
                 messages.append({
                     "role": "assistant",
                     "content": message.content,
@@ -659,16 +704,57 @@ class AgentRunner:
                         "content": result,
                     })
                 
-                # Get next response (non-streaming for tool loop) - continue using router model
-                response = self.client.chat.completions.create(
-                    model=self.router_model,
-                    messages=messages,
-                    tools=tools if tools else None,
-                    tool_choice="auto" if tools else None,
-                    max_tokens=2048,
-                    temperature=0.7,
-                )
+                # Get next response (non-streaming for tool loop) - continue using same model
+                # Check circuit breaker again
+                use_router_model = self.router_model
+                if (AgentRunner._router_rate_limited_until and 
+                    time.time() < AgentRunner._router_rate_limited_until and
+                    self.router_model != self.model):
+                    use_router_model = self.model
+                
+                try:
+                    response = self.client.chat.completions.create(
+                        model=use_router_model,
+                        messages=messages,
+                        tools=tools if tools else None,
+                        tool_choice="auto" if tools else None,
+                        max_tokens=2048,
+                        temperature=0.7,
+                        parallel_tool_calls=True,
+                    )
+                    # If router worked, reset circuit breaker
+                    if use_router_model == self.router_model and AgentRunner._router_rate_limited_until:
+                        logger.info(f"{self.router_model} working again, resetting circuit breaker")
+                        AgentRunner._router_rate_limited_until = None
+                except Exception as e:
+                    error_str = str(e)
+                    # Check if it's a rate limit error
+                    if ("RateLimitReached" in error_str or 
+                        "rate_limit" in error_str.lower() or 
+                        "429" in error_str or
+                        "Too Many Requests" in error_str):
+                        logger.warning(f"Rate limit hit for {use_router_model}, falling back to {self.model}")
+                        # Set circuit breaker for 5 minutes
+                        AgentRunner._router_rate_limited_until = time.time() + 300
+                        # Fall back to using responder model
+                        response = self.client.chat.completions.create(
+                            model=self.model,
+                            messages=messages,
+                            tools=tools if tools else None,
+                            tool_choice="auto" if tools else None,
+                            max_tokens=2048,
+                            temperature=0.7,
+                            parallel_tool_calls=True,
+                        )
+                    else:
+                        raise
+                
                 message = response.choices[0].message
+                
+                if iteration_count >= self.max_tool_iterations and message.tool_calls:
+                    logger.warning(f"Reached max tool iterations ({self.max_tool_iterations}), stopping tool loop")
+                    # Clear tool calls to proceed to response generation
+                    message.tool_calls = None
             
             # Now stream the final response
             yield StatusEvent(message="Genererer svar...")
